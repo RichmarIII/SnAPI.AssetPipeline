@@ -1,0 +1,72 @@
+# Base & language
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++20
+
+# Line length & wrapping
+ColumnLimit: 150
+ReflowComments: Always
+
+# Indentation
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+ContinuationIndentWidth: 2
+NamespaceIndentation: All            # keep code at column 0 inside namespaces
+IndentAccessModifiers: true
+AccessModifierOffset: -2
+IndentCaseLabels: true
+IndentPPDirectives: AfterHash
+
+# Braces & layout
+BreakBeforeBraces: Custom              # K&R style: `void f() {`
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+BraceWrapping:
+  AfterClass: true
+  AfterControlStatement: true
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterStruct: true
+  BeforeElse: true
+  BeforeCatch: true
+  SplitEmptyFunction: true
+  SplitEmptyRecord: true
+  SplitEmptyNamespace: true
+
+# Spaces
+SpaceBeforeParens: ControlStatements   # `if (` but `Func(` for calls
+SpacesBeforeTrailingComments: 1
+SpaceAfterCStyleCast: false
+SpaceInEmptyBlock: false
+SpaceAfterTemplateKeyword: false
+Cpp11BracedListStyle: true
+
+# Pointers & references (match your `Type *p`, `Type &r`)
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+
+# Function signatures & calls
+BinPackArguments: true
+BinPackParameters: true
+KeepEmptyLinesAtTheStartOfBlocks: true
+
+# Includes (don’t reshuffle your order)
+SortIncludes: Never
+IncludeBlocks: Preserve
+IncludeCategories:
+  - Regex: '.*'
+    Priority: 1
+
+# Comments & docs
+AlignTrailingComments: Always
+
+# Formatting odds & ends
+SortUsingDeclarations: false
+QualifierAlignment: Left
+EmptyLineBeforeAccessModifier: LogicalBlock
+InsertTrailingCommas: None
