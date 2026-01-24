@@ -42,8 +42,8 @@ public:
         IdxHeader.EntryCount = 0;
         IdxHeader.BulkEntryCount = 0;
         IdxHeader.BlockSize = sizeof(SnPakIndexHeaderV1);
-        IdxHeader.HashHi = 0;
-        IdxHeader.HashLo = 0;
+        IdxHeader.EntriesHashHi = 0;
+        IdxHeader.EntriesHashLo = 0;
 
         // Calculate offsets
         uint64_t Offset = sizeof(Header);

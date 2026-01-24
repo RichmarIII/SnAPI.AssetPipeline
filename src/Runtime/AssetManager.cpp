@@ -1,4 +1,7 @@
 #include "AssetManager.h"
+#include "Runtime/SourceAssetResolver.h"
+#include "Runtime/RuntimePipeline.h"
+#include "Runtime/AutoMountScanner.h"
 
 #include <algorithm>
 #include <chrono>
@@ -42,6 +45,10 @@ namespace SnAPI::AssetPipeline
       // Hot reload
       bool bHotReloadEnabled = false;
       AssetManager::HotReloadCallback HotReloadCallback;
+
+      // Source asset support
+      std::unique_ptr<SourceAssetResolver> SourceResolver;
+      std::unique_ptr<RuntimePipeline> Pipeline;
 
       // Parent pointer for async loader
       AssetManager* Parent = nullptr;
@@ -101,6 +108,55 @@ namespace SnAPI::AssetPipeline
     m_Impl->Cache = std::make_unique<AssetCache>(Config.CacheConfig);
     m_Impl->bHotReloadEnabled = Config.bEnableHotReload;
     m_Impl->Parent = this;
+
+    // Auto-mount packs from search paths
+    if (!Config.PackSearchPaths.empty())
+    {
+      auto DiscoveredPacks = AutoMountScanner::Scan(Config.PackSearchPaths);
+      for (const auto& PackPath : DiscoveredPacks)
+      {
+        MountPack(PackPath);
+      }
+    }
+
+    // Initialize source asset support
+    if (Config.bEnableSourceAssets)
+    {
+      m_Impl->SourceResolver = std::make_unique<SourceAssetResolver>();
+      for (const auto& Root : Config.SourceRoots)
+      {
+        m_Impl->SourceResolver->AddRoot(Root);
+      }
+
+      m_Impl->Pipeline = std::make_unique<RuntimePipeline>(Config.PipelineConfig);
+      auto InitResult = m_Impl->Pipeline->Initialize();
+      if (!InitResult.has_value())
+      {
+        // Pipeline init failed - disable source assets
+        m_Impl->Pipeline.reset();
+        m_Impl->SourceResolver.reset();
+      }
+      else
+      {
+        // If runtime pack exists on disk, mount it at low priority
+        std::string RuntimePackPath;
+        if (!Config.PipelineConfig.OutputDirectory.empty())
+        {
+          RuntimePackPath = (std::filesystem::path(Config.PipelineConfig.OutputDirectory) / Config.PipelineConfig.RuntimePackName).string();
+        }
+        else
+        {
+          RuntimePackPath = Config.PipelineConfig.RuntimePackName;
+        }
+
+        if (std::filesystem::exists(RuntimePackPath))
+        {
+          PackMountOptions Options;
+          Options.Priority = -50;
+          MountPack(RuntimePackPath, Options);
+        }
+      }
+    }
   }
 
   AssetManager::~AssetManager()
@@ -109,6 +165,12 @@ namespace SnAPI::AssetPipeline
     if (m_Impl->Loader)
     {
       m_Impl->Loader->Shutdown();
+    }
+
+    // Auto-save dirty runtime assets if configured
+    if (m_Impl->Pipeline && m_Impl->Pipeline->GetDirtyCount() > 0 && m_Impl->Config.PipelineConfig.bAutoSave)
+    {
+      SaveRuntimeAssets();
     }
   }
 
@@ -266,8 +328,19 @@ namespace SnAPI::AssetPipeline
 
   std::expected<UniqueVoidPtr, std::string> AssetManager::LoadAnyByName(const std::string& Name, std::type_index RuntimeType)
   {
-    // Find the asset
+    // Find the asset in mounted packs
     auto [Reader, Info, Pack] = m_Impl->FindPackForAssetByName(Name);
+
+    // If not found and source assets enabled, try pipeline
+    if (!Reader && m_Impl->SourceResolver && m_Impl->Pipeline)
+    {
+      auto PipeResult = TryPipelineSource(Name);
+      if (PipeResult.has_value())
+      {
+        return LoadFromRuntimePipeline(Name, RuntimeType);
+      }
+    }
+
     if (!Reader)
     {
       return std::unexpected("Asset not found: " + Name);
@@ -497,6 +570,144 @@ namespace SnAPI::AssetPipeline
   void AssetManager::SetHotReloadCallback(HotReloadCallback Callback)
   {
     m_Impl->HotReloadCallback = std::move(Callback);
+  }
+
+  // ========== Source Asset Management ==========
+
+  void AssetManager::AddSourceRoot(const SourceMountConfig& Config)
+  {
+    if (m_Impl->SourceResolver)
+    {
+      m_Impl->SourceResolver->AddRoot(Config);
+    }
+  }
+
+  void AssetManager::RemoveSourceRoot(const std::string& RootPath)
+  {
+    if (m_Impl->SourceResolver)
+    {
+      m_Impl->SourceResolver->RemoveRoot(RootPath);
+    }
+  }
+
+  void AssetManager::RegisterImporter(std::unique_ptr<IAssetImporter> Importer)
+  {
+    if (m_Impl->Pipeline)
+    {
+      m_Impl->Pipeline->RegisterImporter(std::move(Importer));
+    }
+  }
+
+  void AssetManager::RegisterCooker(std::unique_ptr<IAssetCooker> Cooker)
+  {
+    if (m_Impl->Pipeline)
+    {
+      m_Impl->Pipeline->RegisterCooker(std::move(Cooker));
+    }
+  }
+
+  std::expected<void, std::string> AssetManager::SaveRuntimeAssets()
+  {
+    if (!m_Impl->Pipeline)
+    {
+      return std::unexpected("Runtime pipeline not initialized");
+    }
+    return m_Impl->Pipeline->SaveAll();
+  }
+
+  uint32_t AssetManager::GetDirtyAssetCount() const
+  {
+    if (!m_Impl->Pipeline)
+    {
+      return 0;
+    }
+    return m_Impl->Pipeline->GetDirtyCount();
+  }
+
+  std::expected<AssetId, std::string> AssetManager::TryPipelineSource(const std::string& Name)
+  {
+    // Check if already pipelined this session
+    if (m_Impl->Pipeline->HasAsset(Name))
+    {
+      return m_Impl->Pipeline->GetAssetId(Name);
+    }
+
+    // Resolve source path
+    auto Resolved = m_Impl->SourceResolver->Resolve(Name);
+    if (!Resolved)
+    {
+      return std::unexpected("Source not found: " + Name);
+    }
+
+    // Pipeline it
+    auto Result = m_Impl->Pipeline->ProcessSource(Resolved->AbsolutePath, Resolved->LogicalName);
+    if (!Result.has_value())
+    {
+      return std::unexpected(Result.error());
+    }
+    return Result->Id;
+  }
+
+  std::expected<UniqueVoidPtr, std::string> AssetManager::LoadFromRuntimePipeline(
+      const std::string& Name, std::type_index RuntimeType)
+  {
+    const auto* Asset = m_Impl->Pipeline->GetCookedAsset(Name);
+    if (!Asset)
+    {
+      return std::unexpected("Asset not in runtime pipeline: " + Name);
+    }
+
+    // Find factory for this runtime type
+    auto FactoryIt = m_Impl->FactoriesByRuntimeType.find(RuntimeType);
+    if (FactoryIt == m_Impl->FactoriesByRuntimeType.end())
+    {
+      return std::unexpected("No factory registered for requested runtime type");
+    }
+
+    IAssetFactory* Factory = FactoryIt->second.get();
+
+    // Verify the factory handles this cooked payload type
+    if (Factory->GetCookedPayloadType() != Asset->Cooked.PayloadType)
+    {
+      return std::unexpected("Factory cooked type mismatch - asset has type " + Asset->Cooked.PayloadType.ToString() +
+                             " but factory expects " + Factory->GetCookedPayloadType().ToString());
+    }
+
+    // Build AssetInfo for the context
+    AssetInfo Info;
+    Info.Id = Asset->Id;
+    Info.AssetKind = Asset->AssetKind;
+    Info.CookedPayloadType = Asset->Cooked.PayloadType;
+    Info.SchemaVersion = 0;
+    Info.Name = Asset->LogicalName;
+    Info.BulkChunkCount = static_cast<uint32_t>(Asset->Bulk.size());
+
+    // Create load context with in-memory data
+    const auto& BulkChunks = Asset->Bulk;
+    AssetLoadContext Context{
+        .Cooked = Asset->Cooked,
+        .Info = Info,
+        .LoadBulk = [&BulkChunks](uint32_t Index) -> std::expected<std::vector<uint8_t>, std::string> {
+          if (Index >= BulkChunks.size())
+          {
+            return std::unexpected("Bulk index out of range");
+          }
+          return BulkChunks[Index].Bytes;
+        },
+        .GetBulkInfo = [&BulkChunks](uint32_t Index) -> std::expected<AssetPackReader::BulkChunkInfo, std::string> {
+          if (Index >= BulkChunks.size())
+          {
+            return std::unexpected("Bulk index out of range");
+          }
+          return AssetPackReader::BulkChunkInfo{
+              .Semantic = BulkChunks[Index].Semantic,
+              .SubIndex = BulkChunks[Index].SubIndex,
+              .UncompressedSize = BulkChunks[Index].Bytes.size(),
+          };
+        },
+        .Registry = &m_Impl->Registry};
+
+    return Factory->Load(Context);
   }
 
 } // namespace SnAPI::AssetPipeline

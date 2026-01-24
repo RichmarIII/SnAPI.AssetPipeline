@@ -7,14 +7,8 @@
 #include "IAssetCooker.h"
 #include "IPluginRegistrar.h"
 
+#include "Pipeline/PluginLoaderInternal.h"
 #include "Pack/SnPakFormat.h"
-
-#ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
-#  include <windows.h>
-#else
-#  include <dlfcn.h>
-#endif
 
 #define XXH_INLINE_ALL
 #include <xxhash.h>
@@ -33,116 +27,6 @@ namespace SnAPI::AssetPipeline
 
   // Forward declarations
   std::unique_ptr<IPipelineContext> CreatePipelineContext(PayloadRegistry* Registry, const std::unordered_map<std::string, std::string>* Options);
-
-  // Include PluginLoader implementation (defined in PluginLoader.cpp, but we need the class)
-  class PluginLoader;
-
-  // LoadedPlugin structure (must match PluginLoader.cpp)
-  struct LoadedPlugin
-  {
-      std::string Name;
-      std::string Version;
-      std::string Path;
-
-#ifdef _WIN32
-      void* Handle = nullptr;
-#else
-      void* Handle = nullptr;
-#endif
-
-      std::vector<std::unique_ptr<IAssetImporter>> Importers;
-      std::vector<std::unique_ptr<IAssetCooker>> Cookers;
-      std::vector<std::unique_ptr<IPayloadSerializer>> Serializers;
-  };
-
-  // PluginLoader inline implementation for the engine
-  class PluginLoaderInternal
-  {
-    public:
-      ~PluginLoaderInternal()
-      {
-        UnloadAll();
-      }
-
-      bool LoadPlugin(const std::string& Path);
-      void UnloadAll();
-
-      void TransferSerializers(PayloadRegistry& Registry)
-      {
-        for (auto& Plugin : m_Plugins)
-        {
-          for (auto& Serializer : Plugin.Serializers)
-          {
-            Registry.Register(std::move(Serializer));
-          }
-          Plugin.Serializers.clear();
-        }
-      }
-
-      const std::vector<LoadedPlugin>& GetPlugins() const
-      {
-        return m_Plugins;
-      }
-
-      std::vector<IAssetImporter*> GetAllImporters() const
-      {
-        std::vector<IAssetImporter*> Result;
-        for (const auto& Plugin : m_Plugins)
-        {
-          for (const auto& Importer : Plugin.Importers)
-          {
-            Result.push_back(Importer.get());
-          }
-        }
-        return Result;
-      }
-
-      std::vector<IAssetCooker*> GetAllCookers() const
-      {
-        std::vector<IAssetCooker*> Result;
-        for (const auto& Plugin : m_Plugins)
-        {
-          for (const auto& Cooker : Plugin.Cookers)
-          {
-            Result.push_back(Cooker.get());
-          }
-        }
-        return Result;
-      }
-
-      IAssetImporter* FindImporter(const SourceRef& Source) const
-      {
-        for (const auto& Plugin : m_Plugins)
-        {
-          for (const auto& Importer : Plugin.Importers)
-          {
-            if (Importer->CanImport(Source))
-            {
-              return Importer.get();
-            }
-          }
-        }
-        return nullptr;
-      }
-
-      IAssetCooker* FindCooker(TypeId AssetKind, TypeId IntermediateType) const
-      {
-        for (const auto& Plugin : m_Plugins)
-        {
-          for (const auto& Cooker : Plugin.Cookers)
-          {
-            if (Cooker->CanCook(AssetKind, IntermediateType))
-            {
-              return Cooker.get();
-            }
-          }
-        }
-        return nullptr;
-      }
-
-    private:
-      std::vector<LoadedPlugin> m_Plugins;
-  };
 
   // Incremental cache for tracking built assets
   class IncrementalCache
@@ -766,38 +650,6 @@ namespace SnAPI::AssetPipeline
   {
     return m_Impl->CookerInfos;
   }
-
-  // PluginLoader implementation
-
-  class PluginRegistrarImpl : public IPluginRegistrar
-  {
-    public:
-      explicit PluginRegistrarImpl(LoadedPlugin& Plugin) : m_Plugin(Plugin) {}
-
-      void RegisterImporter(std::unique_ptr<IAssetImporter> Importer) override
-      {
-        m_Plugin.Importers.push_back(std::move(Importer));
-      }
-
-      void RegisterCooker(std::unique_ptr<IAssetCooker> Cooker) override
-      {
-        m_Plugin.Cookers.push_back(std::move(Cooker));
-      }
-
-      void RegisterPayloadSerializer(std::unique_ptr<IPayloadSerializer> Serializer) override
-      {
-        m_Plugin.Serializers.push_back(std::move(Serializer));
-      }
-
-      void RegisterPluginInfo(const char* Name, const char* VersionString) override
-      {
-        m_Plugin.Name = Name ? Name : "";
-        m_Plugin.Version = VersionString ? VersionString : "";
-      }
-
-    private:
-      LoadedPlugin& m_Plugin;
-  };
 
   bool PluginLoaderInternal::LoadPlugin(const std::string& Path)
   {

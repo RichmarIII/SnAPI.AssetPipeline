@@ -3,6 +3,7 @@ add_executable(SnAPI.AssetPipeline.Tests
     PackFormatTests.cpp
     PipelineTests.cpp
     CorruptionTests.cpp
+    SourceAssetTests.cpp
 )
 
 target_link_libraries(SnAPI.AssetPipeline.Tests

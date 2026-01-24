@@ -14,6 +14,7 @@
 #include "PayloadRegistry.h"
 #include "AssetCache.h"
 #include "AsyncLoader.h"
+#include "RuntimePipelineConfig.h"
 
 namespace SnAPI::AssetPipeline
 {
@@ -123,6 +124,18 @@ struct SNAPI_ASSETPIPELINE_API AssetManagerConfig
     uint32_t AsyncLoaderThreads = 0;    // 0 = auto (hardware_concurrency - 1)
     bool bEnableHotReload = false;      // Watch for pack file changes
     std::chrono::milliseconds HotReloadPollInterval{500};
+
+    // Source asset roots for transparent loading
+    std::vector<SourceMountConfig> SourceRoots;
+
+    // Directories to auto-discover and mount .snpak files from
+    std::vector<std::string> PackSearchPaths;
+
+    // Runtime pipeline config (empty PluginPaths = disabled)
+    RuntimePipelineConfig PipelineConfig;
+
+    // Enable transparent source asset loading
+    bool bEnableSourceAssets = false;
 };
 
 // Asset manager - manages pack readers, caching, and provides Load<T>() API
@@ -299,6 +312,25 @@ public:
     using HotReloadCallback = std::function<void(const std::vector<AssetId>&)>;
     void SetHotReloadCallback(HotReloadCallback Callback);
 
+    // ========== Source Asset Management ==========
+
+    // Add a source root for transparent loading
+    void AddSourceRoot(const SourceMountConfig& Config);
+
+    // Remove a source root
+    void RemoveSourceRoot(const std::string& RootPath);
+
+    // Register importer/cooker directly (without plugin DLL)
+    // Requires bEnableSourceAssets = true in config
+    void RegisterImporter(std::unique_ptr<IAssetImporter> Importer);
+    void RegisterCooker(std::unique_ptr<IAssetCooker> Cooker);
+
+    // Save all dirty runtime-pipelined assets to disk
+    std::expected<void, std::string> SaveRuntimeAssets();
+
+    // Get number of dirty (unsaved) runtime-pipelined assets
+    uint32_t GetDirtyAssetCount() const;
+
     // ========== Internal (for AsyncLoader) ==========
 
     std::expected<UniqueVoidPtr, std::string> LoadAnyByName(const std::string& Name, std::type_index RuntimeType);
@@ -316,6 +348,9 @@ private:
     void RegisterFactoryImpl(std::type_index RuntimeType, std::unique_ptr<IAssetFactory> Factory);
     std::expected<AssetId, std::string> ResolveAssetId(const std::string& Name, std::type_index RuntimeType);
     size_t EstimateAssetSize(AssetId Id, std::type_index RuntimeType);
+
+    std::expected<AssetId, std::string> TryPipelineSource(const std::string& Name);
+    std::expected<UniqueVoidPtr, std::string> LoadFromRuntimePipeline(const std::string& Name, std::type_index RuntimeType);
 
     struct Impl;
     std::unique_ptr<Impl> m_Impl;
