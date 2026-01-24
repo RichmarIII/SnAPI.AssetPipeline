@@ -188,12 +188,22 @@ TEST_CASE("PipelineBuildConfig defaults", "[pipeline]")
     REQUIRE(Config.bVerbose == false);
 }
 
-TEST_CASE("AssetPipelineEngine initialization requires valid config", "[pipeline]")
+TEST_CASE("AssetPipelineEngine initialization with empty config succeeds", "[pipeline]")
 {
     AssetPipelineEngine Engine;
 
     PipelineBuildConfig Config;
-    // Empty config should fail
+    // Empty config is valid (relaxed: no source roots/output required)
+    auto Result = Engine.Initialize(Config);
+    REQUIRE(Result.has_value());
+}
+
+TEST_CASE("AssetPipelineEngine initialization fails with nonexistent source root", "[pipeline]")
+{
+    AssetPipelineEngine Engine;
+
+    PipelineBuildConfig Config;
+    Config.SourceRoots = {"/nonexistent/path/xyz"};
     auto Result = Engine.Initialize(Config);
     REQUIRE_FALSE(Result.has_value());
 }

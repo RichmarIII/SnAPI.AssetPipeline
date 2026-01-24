@@ -14,7 +14,8 @@
 #include "PayloadRegistry.h"
 #include "AssetCache.h"
 #include "AsyncLoader.h"
-#include "RuntimePipelineConfig.h"
+#include "SourceMountConfig.h"
+#include "PipelineBuildConfig.h"
 
 namespace SnAPI::AssetPipeline
 {
@@ -34,20 +35,15 @@ struct AssetLoadContext
     // Function to load bulk chunk info
     std::function<std::expected<AssetPackReader::BulkChunkInfo, std::string>(uint32_t)> GetBulkInfo;
 
-    // Payload registry for deserialization (may be null if not configured)
-    const PayloadRegistry* Registry;
+    // Payload registry for deserialization
+    const PayloadRegistry& Registry;
 
     // Helper to deserialize the cooked payload using the registry
     // T must match the struct type for the payload's TypeId
     template<typename T>
     std::expected<T, std::string> DeserializeCooked() const
     {
-        if (!Registry)
-        {
-            return std::unexpected("No PayloadRegistry configured - cannot deserialize");
-        }
-
-        const IPayloadSerializer* Serializer = Registry->Find(Cooked.PayloadType);
+        const IPayloadSerializer* Serializer = Registry.Find(Cooked.PayloadType);
         if (!Serializer)
         {
             return std::unexpected("No serializer found for payload type: " + Cooked.PayloadType.ToString());
@@ -131,11 +127,14 @@ struct SNAPI_ASSETPIPELINE_API AssetManagerConfig
     // Directories to auto-discover and mount .snpak files from
     std::vector<std::string> PackSearchPaths;
 
-    // Runtime pipeline config (empty PluginPaths = disabled)
-    RuntimePipelineConfig PipelineConfig;
+    // Pipeline config (for on-demand processing and registry ownership)
+    PipelineBuildConfig PipelineConfig;
 
     // Enable transparent source asset loading
     bool bEnableSourceAssets = false;
+
+    // Auto-save dirty assets on AssetManager destruction
+    bool bAutoSave = false;
 };
 
 // Asset manager - manages pack readers, caching, and provides Load<T>() API
@@ -320,10 +319,10 @@ public:
     // Remove a source root
     void RemoveSourceRoot(const std::string& RootPath);
 
-    // Register importer/cooker directly (without plugin DLL)
-    // Requires bEnableSourceAssets = true in config
+    // Register importer/cooker/serializer directly (without plugin DLL)
     void RegisterImporter(std::unique_ptr<IAssetImporter> Importer);
     void RegisterCooker(std::unique_ptr<IAssetCooker> Cooker);
+    void RegisterSerializer(std::unique_ptr<IPayloadSerializer> Serializer);
 
     // Save all dirty runtime-pipelined assets to disk
     std::expected<void, std::string> SaveRuntimeAssets();

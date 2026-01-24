@@ -1,6 +1,6 @@
 #pragma once
 
-#include "RuntimePipelineConfig.h"
+#include "SourceMountConfig.h"
 
 #include <algorithm>
 #include <optional>

@@ -15,6 +15,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -110,6 +111,14 @@ namespace SnAPI::AssetPipeline
       std::vector<PluginInfo> PluginInfos;
       std::vector<ImporterInfo> ImporterInfos;
       std::vector<CookerInfo> CookerInfos;
+
+      // In-memory cooked assets (on-demand processing)
+      std::unordered_map<std::string, CookedAsset> CookedAssets;
+      mutable std::mutex AssetsMutex;
+
+      // In-flight deduplication
+      std::unordered_map<std::string, std::shared_future<std::expected<PipelineResult, std::string>>> InFlight;
+      std::mutex InFlightMutex;
 
       std::mutex ErrorMutex;
       std::vector<std::string> Errors;
@@ -257,13 +266,156 @@ namespace SnAPI::AssetPipeline
 
         return Sources;
       }
+
+      // On-demand: process a source file and store in memory
+      std::expected<PipelineResult, std::string> ProcessSourceToMemory(
+          const std::string& AbsolutePath, const std::string& LogicalName)
+      {
+        // Check if already processed
+        {
+          std::lock_guard Lock(AssetsMutex);
+          auto It = CookedAssets.find(LogicalName);
+          if (It != CookedAssets.end())
+          {
+            return PipelineResult{It->second.Id, It->second.LogicalName};
+          }
+        }
+
+        // Check for in-flight processing (deduplication)
+        std::shared_future<std::expected<PipelineResult, std::string>> Future;
+        {
+          std::lock_guard Lock(InFlightMutex);
+          auto It = InFlight.find(LogicalName);
+          if (It != InFlight.end())
+          {
+            Future = It->second;
+          }
+          else
+          {
+            std::promise<std::expected<PipelineResult, std::string>> Promise;
+            Future = Promise.get_future().share();
+            InFlight[LogicalName] = Future;
+
+            auto Result = DoProcessSourceToMemory(AbsolutePath, LogicalName);
+            Promise.set_value(Result);
+
+            InFlight.erase(LogicalName);
+            return Result;
+          }
+        }
+
+        return Future.get();
+      }
+
+      // Actually process one source file to in-memory storage
+      std::expected<PipelineResult, std::string> DoProcessSourceToMemory(
+          const std::string& AbsolutePath, const std::string& LogicalName)
+      {
+        // Read file and compute hash
+        std::ifstream File(AbsolutePath, std::ios::binary | std::ios::ate);
+        if (!File.is_open())
+        {
+          return std::unexpected("Cannot open source file: " + AbsolutePath);
+        }
+
+        auto FileSize = File.tellg();
+        if (FileSize <= 0)
+        {
+          return std::unexpected("Source file is empty: " + AbsolutePath);
+        }
+
+        std::vector<uint8_t> FileData(static_cast<size_t>(FileSize));
+        File.seekg(0);
+        File.read(reinterpret_cast<char*>(FileData.data()), FileSize);
+        File.close();
+
+        uint64_t ContentHash = XXH3_64bits(FileData.data(), FileData.size());
+
+        // Create source ref
+        SourceRef Source;
+        Source.Uri = AbsolutePath;
+        Source.ContentHash = ContentHash;
+
+        // Find importer
+        IAssetImporter* Importer = Loader->FindImporter(Source);
+        if (!Importer)
+        {
+          return std::unexpected("No importer found for: " + AbsolutePath);
+        }
+
+        // Import
+        std::vector<ImportedItem> Items;
+        if (!Importer->Import(Source, Items, *Context))
+        {
+          return std::unexpected("Import failed for: " + AbsolutePath);
+        }
+
+        if (Items.empty())
+        {
+          return std::unexpected("Import produced no items for: " + AbsolutePath);
+        }
+
+        PipelineResult FinalResult;
+
+        // Cook each imported item
+        for (auto& Item : Items)
+        {
+          Item.LogicalName = LogicalName;
+
+          if (Config.bDeterministicAssetIds)
+          {
+            Item.Id = Context->MakeDeterministicAssetId(Item.LogicalName, Item.VariantKey);
+          }
+
+          IAssetCooker* Cooker = Loader->FindCooker(Item.AssetKind, Item.Intermediate.PayloadType);
+          if (!Cooker)
+          {
+            return std::unexpected("No cooker found for asset: " + Item.LogicalName +
+                                   " (Kind: " + Item.AssetKind.ToString() + ")");
+          }
+
+          CookRequest Req;
+          Req.Id = Item.Id;
+          Req.LogicalName = Item.LogicalName;
+          Req.AssetKind = Item.AssetKind;
+          Req.VariantKey = Item.VariantKey;
+          Req.Intermediate = std::move(Item.Intermediate);
+          Req.Dependencies = std::move(Item.Dependencies);
+          Req.BuildOptions = Config.BuildOptions;
+
+          CookResult Result;
+          if (!Cooker->Cook(Req, Result, *Context))
+          {
+            return std::unexpected("Cook failed for asset: " + Req.LogicalName);
+          }
+
+          // Store in memory
+          CookedAsset Asset;
+          Asset.Id = Req.Id;
+          Asset.LogicalName = Req.LogicalName;
+          Asset.AssetKind = Req.AssetKind;
+          Asset.Cooked = std::move(Result.Cooked);
+          Asset.Bulk = std::move(Result.Bulk);
+          Asset.bDirty = true;
+
+          FinalResult.Id = Asset.Id;
+          FinalResult.LogicalName = Asset.LogicalName;
+
+          {
+            std::lock_guard Lock(AssetsMutex);
+            CookedAssets[Req.LogicalName] = std::move(Asset);
+          }
+        }
+
+        return FinalResult;
+      }
   };
 
   AssetPipelineEngine::AssetPipelineEngine() : m_Impl(std::make_unique<Impl>()) {}
 
   AssetPipelineEngine::~AssetPipelineEngine() = default;
 
-  std::expected<void, std::string> AssetPipelineEngine::Initialize(const PipelineBuildConfig& Config) const
+  std::expected<void, std::string> AssetPipelineEngine::Initialize(const PipelineBuildConfig& Config)
   {
     m_Impl->Config = Config;
 
@@ -324,18 +476,7 @@ namespace SnAPI::AssetPipeline
       m_Impl->Cache->Open(Config.CacheDatabasePath);
     }
 
-    // Validate config
-    if (Config.OutputPackPath.empty())
-    {
-      return std::unexpected("OutputPackPath is required");
-    }
-
-    if (Config.SourceRoots.empty())
-    {
-      return std::unexpected("At least one SourceRoot is required");
-    }
-
-    // Verify source roots exist
+    // Verify source roots exist (if specified)
     for (const auto& Root : Config.SourceRoots)
     {
       if (!std::filesystem::exists(Root))
@@ -344,13 +485,10 @@ namespace SnAPI::AssetPipeline
       }
     }
 
-    // Freeze registry after all plugins loaded
-    m_Impl->Registry->Freeze();
-
     return {};
   }
 
-  BuildResult AssetPipelineEngine::BuildAll() const
+  BuildResult AssetPipelineEngine::BuildAll()
   {
     BuildResult Result;
     Result.bSuccess = true;
@@ -424,7 +562,7 @@ namespace SnAPI::AssetPipeline
     return Result;
   }
 
-  BuildResult AssetPipelineEngine::BuildChanged() const
+  BuildResult AssetPipelineEngine::BuildChanged()
   {
     BuildResult Result;
     Result.bSuccess = true;
@@ -532,12 +670,12 @@ namespace SnAPI::AssetPipeline
     return Result;
   }
 
-  BuildResult AssetPipelineEngine::BuildAsset(const std::string& SourcePath, const std::string& OutputPack, bool bAppend) const
+  BuildResult AssetPipelineEngine::BuildAsset(const std::string& SourcePath, const std::string& OutputPack, bool bAppend)
   {
     return BuildAssets({SourcePath}, OutputPack, bAppend);
   }
 
-  BuildResult AssetPipelineEngine::BuildAssets(const std::vector<std::string>& SourcePaths, const std::string& OutputPack, bool bAppend) const
+  BuildResult AssetPipelineEngine::BuildAssets(const std::vector<std::string>& SourcePaths, const std::string& OutputPack, bool bAppend)
   {
     BuildResult Result;
     Result.bSuccess = true;
@@ -649,6 +787,180 @@ namespace SnAPI::AssetPipeline
   std::vector<CookerInfo> AssetPipelineEngine::GetCookers() const
   {
     return m_Impl->CookerInfos;
+  }
+
+  // ========== On-Demand Processing ==========
+
+  std::expected<PipelineResult, std::string> AssetPipelineEngine::ProcessSource(
+      const std::string& AbsolutePath, const std::string& LogicalName)
+  {
+    return m_Impl->ProcessSourceToMemory(AbsolutePath, LogicalName);
+  }
+
+  // ========== In-Memory Access ==========
+
+  bool AssetPipelineEngine::HasAsset(const std::string& LogicalName) const
+  {
+    std::lock_guard Lock(m_Impl->AssetsMutex);
+    return m_Impl->CookedAssets.contains(LogicalName);
+  }
+
+  std::expected<AssetId, std::string> AssetPipelineEngine::GetAssetId(const std::string& LogicalName) const
+  {
+    std::lock_guard Lock(m_Impl->AssetsMutex);
+    auto It = m_Impl->CookedAssets.find(LogicalName);
+    if (It == m_Impl->CookedAssets.end())
+    {
+      return std::unexpected("Asset not found: " + LogicalName);
+    }
+    return It->second.Id;
+  }
+
+  std::expected<std::reference_wrapper<const CookedAsset>, std::string> AssetPipelineEngine::GetCookedAsset(
+      const std::string& LogicalName) const
+  {
+    std::lock_guard Lock(m_Impl->AssetsMutex);
+    auto It = m_Impl->CookedAssets.find(LogicalName);
+    if (It == m_Impl->CookedAssets.end())
+    {
+      return std::unexpected("Asset not found: " + LogicalName);
+    }
+    return std::cref(It->second);
+  }
+
+  uint32_t AssetPipelineEngine::GetDirtyCount() const
+  {
+    std::lock_guard Lock(m_Impl->AssetsMutex);
+    uint32_t Count = 0;
+    for (const auto& [Name, Asset] : m_Impl->CookedAssets)
+    {
+      if (Asset.bDirty)
+      {
+        ++Count;
+      }
+    }
+    return Count;
+  }
+
+  // ========== Persistence ==========
+
+  std::expected<void, std::string> AssetPipelineEngine::SaveAll()
+  {
+    std::lock_guard Lock(m_Impl->AssetsMutex);
+
+    uint32_t DirtyCount = 0;
+    for (const auto& [Name, Asset] : m_Impl->CookedAssets)
+    {
+      if (Asset.bDirty)
+      {
+        ++DirtyCount;
+      }
+    }
+
+    if (DirtyCount == 0)
+    {
+      return {};
+    }
+
+    if (m_Impl->Config.OutputPackPath.empty())
+    {
+      return std::unexpected("No OutputPackPath configured - cannot save");
+    }
+
+    // Ensure parent directory exists
+    std::filesystem::path OutputPath(m_Impl->Config.OutputPackPath);
+    if (OutputPath.has_parent_path())
+    {
+      std::filesystem::create_directories(OutputPath.parent_path());
+    }
+
+    // Create writer with configured compression
+    AssetPackWriter Writer;
+    switch (m_Impl->Config.CompressionMode)
+    {
+    case PipelineBuildConfig::ECompressionMode::None:
+      Writer.SetCompression(EPackCompression::None);
+      break;
+    case PipelineBuildConfig::ECompressionMode::LZ4:
+      Writer.SetCompression(EPackCompression::LZ4);
+      break;
+    case PipelineBuildConfig::ECompressionMode::Zstd:
+    case PipelineBuildConfig::ECompressionMode::ZstdMax:
+      Writer.SetCompression(EPackCompression::Zstd);
+      break;
+    }
+
+    // Add all dirty assets
+    for (auto& [Name, Asset] : m_Impl->CookedAssets)
+    {
+      if (!Asset.bDirty)
+      {
+        continue;
+      }
+
+      AssetPackEntry Entry;
+      Entry.Id = Asset.Id;
+      Entry.AssetKind = Asset.AssetKind;
+      Entry.Name = Asset.LogicalName;
+      Entry.Cooked = Asset.Cooked;
+      Entry.Bulk = Asset.Bulk;
+
+      Writer.AddAsset(std::move(Entry));
+    }
+
+    // Write or append
+    std::expected<void, std::string> WriteResult;
+    if (std::filesystem::exists(m_Impl->Config.OutputPackPath))
+    {
+      WriteResult = Writer.AppendUpdate(m_Impl->Config.OutputPackPath);
+    }
+    else
+    {
+      WriteResult = Writer.Write(m_Impl->Config.OutputPackPath);
+    }
+
+    if (!WriteResult.has_value())
+    {
+      return std::unexpected("Failed to write pack: " + WriteResult.error());
+    }
+
+    // Mark all as clean
+    for (auto& [Name, Asset] : m_Impl->CookedAssets)
+    {
+      Asset.bDirty = false;
+    }
+
+    return {};
+  }
+
+  // ========== Inline Registration ==========
+
+  void AssetPipelineEngine::RegisterImporter(std::unique_ptr<IAssetImporter> Importer)
+  {
+    m_Impl->Loader->RegisterImporter(std::move(Importer));
+  }
+
+  void AssetPipelineEngine::RegisterCooker(std::unique_ptr<IAssetCooker> Cooker)
+  {
+    m_Impl->Loader->RegisterCooker(std::move(Cooker));
+  }
+
+  void AssetPipelineEngine::RegisterSerializer(std::unique_ptr<IPayloadSerializer> Serializer)
+  {
+    m_Impl->Loader->RegisterSerializer(std::move(Serializer));
+    m_Impl->Loader->TransferSerializers(*m_Impl->Registry);
+  }
+
+  // ========== Registry Access ==========
+
+  PayloadRegistry& AssetPipelineEngine::GetRegistry()
+  {
+    return *m_Impl->Registry;
+  }
+
+  const PayloadRegistry& AssetPipelineEngine::GetRegistry() const
+  {
+    return *m_Impl->Registry;
   }
 
   bool PluginLoaderInternal::LoadPlugin(const std::string& Path)

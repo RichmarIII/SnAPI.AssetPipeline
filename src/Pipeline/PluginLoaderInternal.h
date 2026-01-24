@@ -160,6 +160,12 @@ class PluginLoaderInternal
       m_Plugins.back().Cookers.push_back(std::move(Cooker));
     }
 
+    void RegisterSerializer(std::unique_ptr<IPayloadSerializer> Serializer)
+    {
+      EnsureInlinePlugin();
+      m_Plugins.back().Serializers.push_back(std::move(Serializer));
+    }
+
   private:
     void EnsureInlinePlugin()
     {

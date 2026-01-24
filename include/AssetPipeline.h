@@ -1,16 +1,24 @@
 #pragma once
 
-#include <memory>
 #include <expected>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "Export.h"
 #include "Uuid.h"
+#include "TypedPayload.h"
+#include "IAssetCooker.h"
 #include "PipelineBuildConfig.h"
 
 namespace SnAPI::AssetPipeline
 {
+
+class IAssetImporter;
+class IAssetCooker;
+class IPayloadSerializer;
+class PayloadRegistry;
 
 struct SNAPI_ASSETPIPELINE_API BuildResult
 {
@@ -41,6 +49,22 @@ struct SNAPI_ASSETPIPELINE_API CookerInfo
     std::string PluginName;
 };
 
+struct SNAPI_ASSETPIPELINE_API CookedAsset
+{
+    AssetId Id;
+    std::string LogicalName;
+    TypeId AssetKind;
+    TypedPayload Cooked;
+    std::vector<BulkChunk> Bulk;
+    bool bDirty = true;
+};
+
+struct SNAPI_ASSETPIPELINE_API PipelineResult
+{
+    AssetId Id;
+    std::string LogicalName;
+};
+
 class SNAPI_ASSETPIPELINE_API AssetPipelineEngine
 {
 public:
@@ -48,34 +72,57 @@ public:
     ~AssetPipelineEngine();
 
     // Initialize with configuration
-    std::expected<void, std::string> Initialize(const PipelineBuildConfig& Config) const;
+    std::expected<void, std::string> Initialize(const PipelineBuildConfig& Config);
+
+    // ========== Batch Build ==========
 
     // Build all assets from scratch
-    BuildResult BuildAll() const;
+    BuildResult BuildAll();
 
     // Build only changed assets (incremental)
-    BuildResult BuildChanged() const;
+    BuildResult BuildChanged();
 
     // Build a single source file to the output pack
-    // sourcePath: path to the source asset file
-    // outputPack: optional override for output pack (uses Config.OutputPackPath if empty)
-    // bAppend: if true, appends to existing pack; if false, replaces matching assets
     BuildResult BuildAsset(const std::string& SourcePath,
                            const std::string& OutputPack = "",
-                           bool bAppend = true) const;
+                           bool bAppend = true);
 
     // Build multiple specific source files
     BuildResult BuildAssets(const std::vector<std::string>& SourcePaths,
                             const std::string& OutputPack = "",
-                            bool bAppend = true) const;
+                            bool bAppend = true);
 
-    // Get loaded plugin info
+    // ========== On-Demand Processing (stores in memory) ==========
+
+    std::expected<PipelineResult, std::string> ProcessSource(
+        const std::string& AbsolutePath, const std::string& LogicalName);
+
+    // ========== In-Memory Access ==========
+
+    bool HasAsset(const std::string& LogicalName) const;
+    std::expected<AssetId, std::string> GetAssetId(const std::string& LogicalName) const;
+    std::expected<std::reference_wrapper<const CookedAsset>, std::string> GetCookedAsset(const std::string& LogicalName) const;
+    uint32_t GetDirtyCount() const;
+
+    // ========== Persistence ==========
+
+    std::expected<void, std::string> SaveAll();
+
+    // ========== Inline Registration ==========
+
+    void RegisterImporter(std::unique_ptr<IAssetImporter> Importer);
+    void RegisterCooker(std::unique_ptr<IAssetCooker> Cooker);
+    void RegisterSerializer(std::unique_ptr<IPayloadSerializer> Serializer);
+
+    // ========== Registry Access ==========
+
+    PayloadRegistry& GetRegistry();
+    const PayloadRegistry& GetRegistry() const;
+
+    // ========== Introspection ==========
+
     [[nodiscard]] std::vector<PluginInfo> GetPlugins() const;
-
-    // Get registered importers
     [[nodiscard]] std::vector<ImporterInfo> GetImporters() const;
-
-    // Get registered cookers
     [[nodiscard]] std::vector<CookerInfo> GetCookers() const;
 
     // Non-copyable
@@ -87,4 +134,4 @@ private:
     std::unique_ptr<Impl> m_Impl;
 };
 
-} // namespace AssetPipeline
+} // namespace SnAPI::AssetPipeline

@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "AssetManager.h"
-#include "RuntimePipelineConfig.h"
+#include "SourceMountConfig.h"
 #include "Runtime/SourceAssetResolver.h"
 #include "Runtime/AutoMountScanner.h"
 #include "IAssetImporter.h"
@@ -247,12 +247,13 @@ TEST_CASE("AssetManager GetDirtyAssetCount returns 0 when pipeline disabled", "[
   REQUIRE(Manager.GetDirtyAssetCount() == 0);
 }
 
-TEST_CASE("AssetManager SaveRuntimeAssets fails gracefully when pipeline disabled", "[source]")
+TEST_CASE("AssetManager SaveRuntimeAssets succeeds with no dirty assets", "[source]")
 {
   AssetManagerConfig Config;
   AssetManager Manager(Config);
   auto Result = Manager.SaveRuntimeAssets();
-  REQUIRE_FALSE(Result.has_value());
+  REQUIRE(Result.has_value()); // No dirty assets = nothing to save = success
+  REQUIRE(Manager.GetDirtyAssetCount() == 0);
 }
 
 // ========== Runtime Pipeline Integration Tests ==========
@@ -377,8 +378,8 @@ struct PipelineTestFixture
       SourceMount.RootPath = SourceDir.Path.string();
       Config.SourceRoots.push_back(SourceMount);
 
-      Config.PipelineConfig.OutputDirectory = OutputDir.Path.string();
-      Config.PipelineConfig.RuntimePackName = "test_runtime.snpak";
+      Config.PipelineConfig.OutputPackPath =
+          (OutputDir.Path / "test_runtime.snpak").string();
       Config.PipelineConfig.bDeterministicAssetIds = true;
 
       auto Manager = std::make_unique<AssetManager>(Config);
@@ -546,7 +547,8 @@ TEST_CASE("AssetManager pipeline with bulk chunks accessible", "[source][pipelin
   SourceMountConfig SourceMount;
   SourceMount.RootPath = Fixture.SourceDir.Path.string();
   Config.SourceRoots.push_back(SourceMount);
-  Config.PipelineConfig.OutputDirectory = Fixture.OutputDir.Path.string();
+  Config.PipelineConfig.OutputPackPath =
+      (Fixture.OutputDir.Path / "test_runtime.snpak").string();
   Config.PipelineConfig.bDeterministicAssetIds = true;
 
   AssetManager Manager(Config);

@@ -31,7 +31,6 @@ set(SNAPI_SOURCES
     src/Runtime/AssetCache.cpp
     src/Runtime/AsyncLoader.cpp
     src/Runtime/SourceAssetResolver.cpp
-    src/Runtime/RuntimePipeline.cpp
     src/Runtime/AutoMountScanner.cpp
 )
 
