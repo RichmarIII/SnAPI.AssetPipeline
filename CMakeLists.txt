@@ -77,6 +77,7 @@ endif()
 # Plugins
 if(SNAPI_BUILD_PLUGINS)
     add_subdirectory(plugins/Texture)
+    add_subdirectory(plugins/TextureCompressor)
 endif()
 
 # Tests

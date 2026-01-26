@@ -1,5 +1,6 @@
 #pragma once
 
+#include <any>
 #include <atomic>
 #include <condition_variable>
 #include <expected>
@@ -91,6 +92,7 @@ struct LoadRequest
     std::string Name;           // If loading by name
     std::type_index RuntimeType;
     ELoadPriority Priority = ELoadPriority::Normal;
+    std::any Params;            // User-supplied parameters passed to factory
     CancellationToken Token;
     std::function<void(void*, const std::string&)> Callback;  // void* = raw asset ptr
     std::function<void(void*)> ResultDeleter;                 // Type-erased deleter for cleanup on cancellation
@@ -118,6 +120,7 @@ public:
     template<typename T>
     AsyncLoadHandle LoadAsync(const std::string& Name,
                                ELoadPriority Priority,
+                               std::any Params,
                                AsyncLoadCallback<T> Callback,
                                CancellationToken Token = {});
 
@@ -125,6 +128,7 @@ public:
     template<typename T>
     AsyncLoadHandle LoadAsync(AssetId Id,
                                ELoadPriority Priority,
+                               std::any Params,
                                AsyncLoadCallback<T> Callback,
                                CancellationToken Token = {});
 
@@ -190,6 +194,7 @@ private:
 template<typename T>
 AsyncLoadHandle AsyncLoader::LoadAsync(const std::string& Name,
                                         ELoadPriority Priority,
+                                        std::any Params,
                                         AsyncLoadCallback<T> Callback,
                                         CancellationToken Token)
 {
@@ -198,6 +203,7 @@ AsyncLoadHandle AsyncLoader::LoadAsync(const std::string& Name,
     Req.Name = Name;
     Req.RuntimeType = std::type_index(typeid(T));
     Req.Priority = Priority;
+    Req.Params = std::move(Params);
     Req.Token = Token;
     Req.QueueTime = std::chrono::steady_clock::now();
 
@@ -236,6 +242,7 @@ AsyncLoadHandle AsyncLoader::LoadAsync(const std::string& Name,
 template<typename T>
 AsyncLoadHandle AsyncLoader::LoadAsync(AssetId Id,
                                         ELoadPriority Priority,
+                                        std::any Params,
                                         AsyncLoadCallback<T> Callback,
                                         CancellationToken Token)
 {
@@ -244,6 +251,7 @@ AsyncLoadHandle AsyncLoader::LoadAsync(AssetId Id,
     Req.TargetAssetId = Id;
     Req.RuntimeType = std::type_index(typeid(T));
     Req.Priority = Priority;
+    Req.Params = std::move(Params);
     Req.Token = Token;
     Req.QueueTime = std::chrono::steady_clock::now();
 

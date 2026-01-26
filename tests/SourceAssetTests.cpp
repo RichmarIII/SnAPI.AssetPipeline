@@ -17,30 +17,30 @@ using namespace SnAPI::AssetPipeline;
 namespace
 {
 
-// Helper to create a temporary directory
-struct TempDir
-{
-    std::filesystem::path Path;
+  // Helper to create a temporary directory
+  struct TempDir
+  {
+      std::filesystem::path Path;
 
-    TempDir()
-    {
-      Path = std::filesystem::temp_directory_path() / ("snapi_test_" + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
-                                                       "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-      std::filesystem::create_directories(Path);
-    }
+      TempDir()
+      {
+        Path = std::filesystem::temp_directory_path() / ("snapi_test_" + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
+                                                         "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(Path);
+      }
 
-    ~TempDir()
-    {
-      std::filesystem::remove_all(Path);
-    }
-};
+      ~TempDir()
+      {
+        std::filesystem::remove_all(Path);
+      }
+  };
 
-void WriteFile(const std::filesystem::path& FilePath, const std::string& Content)
-{
-  std::filesystem::create_directories(FilePath.parent_path());
-  std::ofstream File(FilePath, std::ios::binary);
-  File.write(Content.data(), static_cast<std::streamsize>(Content.size()));
-}
+  void WriteFile(const std::filesystem::path& FilePath, const std::string& Content)
+  {
+    std::filesystem::create_directories(FilePath.parent_path());
+    std::ofstream File(FilePath, std::ios::binary);
+    File.write(Content.data(), static_cast<std::streamsize>(Content.size()));
+  }
 
 } // namespace
 
@@ -261,144 +261,149 @@ TEST_CASE("AssetManager SaveRuntimeAssets succeeds with no dirty assets", "[sour
 namespace
 {
 
-// Test TypeIds
-const TypeId kTestAssetKind{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80,
-                            0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0x01};
-const TypeId kTestIntermediateType{0x11, 0x21, 0x31, 0x41, 0x51, 0x61, 0x71, 0x81,
-                                   0x91, 0xA1, 0xB1, 0xC1, 0xD1, 0xE1, 0xF1, 0x02};
-const TypeId kTestCookedType{0x12, 0x22, 0x32, 0x42, 0x52, 0x62, 0x72, 0x82,
-                             0x92, 0xA2, 0xB2, 0xC2, 0xD2, 0xE2, 0xF2, 0x03};
+  // Test TypeIds
+  const TypeId kTestAssetKind{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0x01};
+  const TypeId kTestIntermediateType{0x11, 0x21, 0x31, 0x41, 0x51, 0x61, 0x71, 0x81, 0x91, 0xA1, 0xB1, 0xC1, 0xD1, 0xE1, 0xF1, 0x02};
+  const TypeId kTestCookedType{0x12, 0x22, 0x32, 0x42, 0x52, 0x62, 0x72, 0x82, 0x92, 0xA2, 0xB2, 0xC2, 0xD2, 0xE2, 0xF2, 0x03};
 
-// Simple runtime type representing a processed asset
-struct TestRuntimeObject
-{
-    std::string OriginalContent;
-    uint32_t ProcessedLength = 0;
-};
+  // Simple runtime type representing a processed asset
+  struct TestRuntimeObject
+  {
+      std::string OriginalContent;
+      uint32_t ProcessedLength = 0;
+  };
 
-// Mock importer: reads ".testasset" files and produces an intermediate payload
-class MockImporter : public IAssetImporter
-{
-  public:
-    std::atomic<int> ImportCount{0};
+  // Mock importer: reads ".testasset" files and produces an intermediate payload
+  class MockImporter : public IAssetImporter
+  {
+    public:
+      std::atomic<int> ImportCount{0};
 
-    const char* GetName() const override { return "MockImporter"; }
-
-    bool CanImport(const SourceRef& Source) const override
-    {
-      return Source.Uri.ends_with(".testasset");
-    }
-
-    bool Import(const SourceRef& Source, std::vector<ImportedItem>& OutItems, IPipelineContext& Ctx) override
-    {
-      ++ImportCount;
-
-      // Read the source file content
-      std::vector<uint8_t> FileData;
-      if (!Ctx.ReadAllBytes(Source.Uri, FileData))
+      const char* GetName() const override
       {
-        return false;
+        return "MockImporter";
       }
 
-      ImportedItem Item;
-      Item.Id = Uuid::Generate();
-      Item.AssetKind = kTestAssetKind;
-      Item.Intermediate = TypedPayload(kTestIntermediateType, 1, std::move(FileData));
+      bool CanImport(const SourceRef& Source) const override
+      {
+        return Source.Uri.ends_with(".testasset");
+      }
 
-      OutItems.push_back(std::move(Item));
-      return true;
-    }
-};
+      bool Import(const SourceRef& Source, std::vector<ImportedItem>& OutItems, IPipelineContext& Ctx) override
+      {
+        ++ImportCount;
 
-// Mock cooker: transforms intermediate → cooked payload (prefixes with "COOKED:")
-class MockCooker : public IAssetCooker
-{
-  public:
-    std::atomic<int> CookCount{0};
+        // Read the source file content
+        std::vector<uint8_t> FileData;
+        if (!Ctx.ReadAllBytes(Source.Uri, FileData))
+        {
+          return false;
+        }
 
-    const char* GetName() const override { return "MockCooker"; }
+        ImportedItem Item;
+        Item.Id = Uuid::Generate();
+        Item.AssetKind = kTestAssetKind;
+        Item.Intermediate = TypedPayload(kTestIntermediateType, 1, std::move(FileData));
 
-    bool CanCook(TypeId AssetKind, TypeId IntermediatePayloadType) const override
-    {
-      return AssetKind == kTestAssetKind && IntermediatePayloadType == kTestIntermediateType;
-    }
+        OutItems.push_back(std::move(Item));
+        return true;
+      }
+  };
 
-    bool Cook(const CookRequest& Req, CookResult& Out, IPipelineContext& Ctx) override
-    {
-      ++CookCount;
+  // Mock cooker: transforms intermediate → cooked payload (prefixes with "COOKED:")
+  class MockCooker : public IAssetCooker
+  {
+    public:
+      std::atomic<int> CookCount{0};
 
-      // Transform: prepend "COOKED:" to the intermediate bytes
-      std::string Prefix = "COOKED:";
-      std::vector<uint8_t> CookedBytes;
-      CookedBytes.insert(CookedBytes.end(), Prefix.begin(), Prefix.end());
-      CookedBytes.insert(CookedBytes.end(), Req.Intermediate.Bytes.begin(), Req.Intermediate.Bytes.end());
+      const char* GetName() const override
+      {
+        return "MockCooker";
+      }
 
-      Out.Cooked = TypedPayload(kTestCookedType, 1, std::move(CookedBytes));
+      bool CanCook(TypeId AssetKind, TypeId IntermediatePayloadType) const override
+      {
+        return AssetKind == kTestAssetKind && IntermediatePayloadType == kTestIntermediateType;
+      }
 
-      // Add a bulk chunk for testing bulk access
-      BulkChunk Chunk(EBulkSemantic::Unknown, 0, false);
-      std::string BulkData = "BULK_DATA_FOR_" + Req.LogicalName;
-      Chunk.Bytes.assign(BulkData.begin(), BulkData.end());
-      Out.Bulk.push_back(std::move(Chunk));
+      bool Cook(const CookRequest& Req, CookResult& Out, IPipelineContext& Ctx) override
+      {
+        ++CookCount;
 
-      return true;
-    }
-};
+        // Transform: prepend "COOKED:" to the intermediate bytes
+        std::string Prefix = "COOKED:";
+        std::vector<uint8_t> CookedBytes;
+        CookedBytes.insert(CookedBytes.end(), Prefix.begin(), Prefix.end());
+        CookedBytes.insert(CookedBytes.end(), Req.Intermediate.Bytes.begin(), Req.Intermediate.Bytes.end());
 
-// Mock factory: creates TestRuntimeObject from cooked payload
-class MockFactory : public TAssetFactory<TestRuntimeObject>
-{
-  public:
-    TypeId GetCookedPayloadType() const override { return kTestCookedType; }
+        Out.Cooked = TypedPayload(kTestCookedType, 1, std::move(CookedBytes));
 
-  protected:
-    std::expected<TestRuntimeObject, std::string> DoLoad(const AssetLoadContext& Context) override
-    {
-      TestRuntimeObject Obj;
-      Obj.OriginalContent = std::string(Context.Cooked.Bytes.begin(), Context.Cooked.Bytes.end());
-      Obj.ProcessedLength = static_cast<uint32_t>(Context.Cooked.Bytes.size());
-      return Obj;
-    }
-};
+        // Add a bulk chunk for testing bulk access
+        BulkChunk Chunk(EBulkSemantic::Unknown, 0, false);
+        std::string BulkData = "BULK_DATA_FOR_" + Req.LogicalName;
+        Chunk.Bytes.assign(BulkData.begin(), BulkData.end());
+        Out.Bulk.push_back(std::move(Chunk));
 
-// Helper to set up AssetManager with source pipeline support
-struct PipelineTestFixture
-{
-    TempDir SourceDir;
-    TempDir OutputDir;
-    MockImporter* ImporterPtr = nullptr;
-    MockCooker* CookerPtr = nullptr;
+        return true;
+      }
+  };
 
-    std::unique_ptr<AssetManager> CreateManager()
-    {
-      AssetManagerConfig Config;
-      Config.bEnableSourceAssets = true;
+  // Mock factory: creates TestRuntimeObject from cooked payload
+  class MockFactory : public TAssetFactory<TestRuntimeObject>
+  {
+    public:
+      TypeId GetCookedPayloadType() const override
+      {
+        return kTestCookedType;
+      }
 
-      SourceMountConfig SourceMount;
-      SourceMount.RootPath = SourceDir.Path.string();
-      Config.SourceRoots.push_back(SourceMount);
+    protected:
+      std::expected<TestRuntimeObject, std::string> DoLoad(const AssetLoadContext& Context) override
+      {
+        TestRuntimeObject Obj;
+        Obj.OriginalContent = std::string(Context.Cooked.Bytes.begin(), Context.Cooked.Bytes.end());
+        Obj.ProcessedLength = static_cast<uint32_t>(Context.Cooked.Bytes.size());
+        return Obj;
+      }
+  };
 
-      Config.PipelineConfig.OutputPackPath =
-          (OutputDir.Path / "test_runtime.snpak").string();
-      Config.PipelineConfig.bDeterministicAssetIds = true;
+  // Helper to set up AssetManager with source pipeline support
+  struct PipelineTestFixture
+  {
+      TempDir SourceDir;
+      TempDir OutputDir;
+      MockImporter* ImporterPtr = nullptr;
+      MockCooker* CookerPtr = nullptr;
 
-      auto Manager = std::make_unique<AssetManager>(Config);
+      std::unique_ptr<AssetManager> CreateManager()
+      {
+        AssetManagerConfig Config;
+        Config.bEnableSourceAssets = true;
 
-      // Register mock importer & cooker
-      auto Importer = std::make_unique<MockImporter>();
-      ImporterPtr = Importer.get();
-      Manager->RegisterImporter(std::move(Importer));
+        SourceMountConfig SourceMount;
+        SourceMount.RootPath = SourceDir.Path.string();
+        Config.SourceRoots.push_back(SourceMount);
 
-      auto Cooker = std::make_unique<MockCooker>();
-      CookerPtr = Cooker.get();
-      Manager->RegisterCooker(std::move(Cooker));
+        Config.PipelineConfig.OutputPackPath = (OutputDir.Path / "test_runtime.snpak").string();
+        Config.PipelineConfig.bDeterministicAssetIds = true;
 
-      // Register factory
-      Manager->RegisterFactory<TestRuntimeObject>(std::make_unique<MockFactory>());
+        auto Manager = std::make_unique<AssetManager>(Config);
 
-      return Manager;
-    }
-};
+        // Register mock importer & cooker
+        auto Importer = std::make_unique<MockImporter>();
+        ImporterPtr = Importer.get();
+        Manager->RegisterImporter(std::move(Importer));
+
+        auto Cooker = std::make_unique<MockCooker>();
+        CookerPtr = Cooker.get();
+        Manager->RegisterCooker(std::move(Cooker));
+
+        // Register factory
+        Manager->RegisterFactory<TestRuntimeObject>(std::make_unique<MockFactory>());
+
+        return Manager;
+      }
+  };
 
 } // namespace
 
@@ -521,7 +526,10 @@ TEST_CASE("AssetManager pipeline with bulk chunks accessible", "[source][pipelin
   class BulkReadingFactory : public TAssetFactory<TestRuntimeObject>
   {
     public:
-      TypeId GetCookedPayloadType() const override { return kTestCookedType; }
+      TypeId GetCookedPayloadType() const override
+      {
+        return kTestCookedType;
+      }
 
     protected:
       std::expected<TestRuntimeObject, std::string> DoLoad(const AssetLoadContext& Context) override
@@ -547,8 +555,7 @@ TEST_CASE("AssetManager pipeline with bulk chunks accessible", "[source][pipelin
   SourceMountConfig SourceMount;
   SourceMount.RootPath = Fixture.SourceDir.Path.string();
   Config.SourceRoots.push_back(SourceMount);
-  Config.PipelineConfig.OutputPackPath =
-      (Fixture.OutputDir.Path / "test_runtime.snpak").string();
+  Config.PipelineConfig.OutputPackPath = (Fixture.OutputDir.Path / "test_runtime.snpak").string();
   Config.PipelineConfig.bDeterministicAssetIds = true;
 
   AssetManager Manager(Config);

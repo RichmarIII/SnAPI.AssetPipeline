@@ -124,7 +124,7 @@ namespace SnAPI::AssetPipeline
         // Load by name or ID
         if (!Req.Name.empty())
         {
-          auto Result = m_Manager.LoadAnyByName(Req.Name, Req.RuntimeType);
+          auto Result = m_Manager.LoadAnyByName(Req.Name, Req.RuntimeType, std::move(Req.Params));
           if (Result.has_value())
           {
             ResultPtr = Result->release();
@@ -136,7 +136,7 @@ namespace SnAPI::AssetPipeline
         }
         else
         {
-          auto Result = m_Manager.LoadAnyById(Req.TargetAssetId, Req.RuntimeType);
+          auto Result = m_Manager.LoadAnyById(Req.TargetAssetId, Req.RuntimeType, std::move(Req.Params));
           if (Result.has_value())
           {
             ResultPtr = Result->release();

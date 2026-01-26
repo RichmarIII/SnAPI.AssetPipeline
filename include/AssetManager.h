@@ -1,5 +1,6 @@
 #pragma once
 
+#include <any>
 #include <expected>
 #include <functional>
 #include <memory>
@@ -37,6 +38,9 @@ struct AssetLoadContext
 
     // Payload registry for deserialization
     const PayloadRegistry& Registry;
+
+    // User-supplied parameters, factories cast to their expected type
+    std::any Params;
 
     // Helper to deserialize the cooked payload using the registry
     // T must match the struct type for the payload's TypeId
@@ -180,9 +184,9 @@ public:
     // Load an asset by name, returning unique ownership
     // Does NOT use cache - always loads fresh
     template<typename T>
-    std::expected<std::unique_ptr<T>, std::string> Load(const std::string& Name)
+    std::expected<std::unique_ptr<T>, std::string> Load(const std::string& Name, std::any Params = {})
     {
-        auto Result = LoadAnyByName(Name, std::type_index(typeid(T)));
+        auto Result = LoadAnyByName(Name, std::type_index(typeid(T)), std::move(Params));
         if (!Result.has_value())
         {
             return std::unexpected(Result.error());
@@ -193,9 +197,9 @@ public:
 
     // Load an asset by ID, returning unique ownership
     template<typename T>
-    std::expected<std::unique_ptr<T>, std::string> Load(AssetId Id)
+    std::expected<std::unique_ptr<T>, std::string> Load(AssetId Id, std::any Params = {})
     {
-        auto Result = LoadAnyById(Id, std::type_index(typeid(T)));
+        auto Result = LoadAnyById(Id, std::type_index(typeid(T)), std::move(Params));
         if (!Result.has_value())
         {
             return std::unexpected(Result.error());
@@ -209,18 +213,18 @@ public:
     // Get a cached asset, loading if not present
     // Returns a ref-counted handle - asset stays in cache while any handle exists
     template<typename T>
-    std::expected<AssetHandle<T>, std::string> Get(const std::string& Name)
+    std::expected<AssetHandle<T>, std::string> Get(const std::string& Name, std::any Params = {})
     {
         auto IdResult = ResolveAssetId(Name, std::type_index(typeid(T)));
         if (!IdResult.has_value())
         {
             return std::unexpected(IdResult.error());
         }
-        return GetById<T>(*IdResult);
+        return GetById<T>(*IdResult, std::move(Params));
     }
 
     template<typename T>
-    std::expected<AssetHandle<T>, std::string> GetById(AssetId Id)
+    std::expected<AssetHandle<T>, std::string> GetById(AssetId Id, std::any Params = {})
     {
         // Check cache first
         auto Handle = GetCache().Get<T>(Id);
@@ -230,7 +234,7 @@ public:
         }
 
         // Not in cache - load and insert
-        auto LoadResult = Load<T>(Id);
+        auto LoadResult = Load<T>(Id, std::move(Params));
         if (!LoadResult.has_value())
         {
             return std::unexpected(LoadResult.error());
@@ -257,19 +261,21 @@ public:
     template<typename T>
     AsyncLoadHandle LoadAsync(const std::string& Name,
                                ELoadPriority Priority = ELoadPriority::Normal,
+                               std::any Params = {},
                                AsyncLoadCallback<T> Callback = nullptr,
                                CancellationToken Token = {})
     {
-        return GetAsyncLoader().LoadAsync<T>(Name, Priority, std::move(Callback), std::move(Token));
+        return GetAsyncLoader().LoadAsync<T>(Name, Priority, std::move(Params), std::move(Callback), std::move(Token));
     }
 
     template<typename T>
     AsyncLoadHandle LoadAsync(AssetId Id,
                                ELoadPriority Priority = ELoadPriority::Normal,
+                               std::any Params = {},
                                AsyncLoadCallback<T> Callback = nullptr,
                                CancellationToken Token = {})
     {
-        return GetAsyncLoader().LoadAsync<T>(Id, Priority, std::move(Callback), std::move(Token));
+        return GetAsyncLoader().LoadAsync<T>(Id, Priority, std::move(Params), std::move(Callback), std::move(Token));
     }
 
     // ========== Asset Discovery ==========
@@ -332,8 +338,8 @@ public:
 
     // ========== Internal (for AsyncLoader) ==========
 
-    std::expected<UniqueVoidPtr, std::string> LoadAnyByName(const std::string& Name, std::type_index RuntimeType);
-    std::expected<UniqueVoidPtr, std::string> LoadAnyById(AssetId Id, std::type_index RuntimeType);
+    std::expected<UniqueVoidPtr, std::string> LoadAnyByName(const std::string& Name, std::type_index RuntimeType, std::any Params = {});
+    std::expected<UniqueVoidPtr, std::string> LoadAnyById(AssetId Id, std::type_index RuntimeType, std::any Params = {});
 
     // Non-copyable
     AssetManager(const AssetManager&) = delete;
@@ -349,7 +355,7 @@ private:
     size_t EstimateAssetSize(AssetId Id, std::type_index RuntimeType);
 
     std::expected<AssetId, std::string> TryPipelineSource(const std::string& Name);
-    std::expected<UniqueVoidPtr, std::string> LoadFromRuntimePipeline(const std::string& Name, std::type_index RuntimeType);
+    std::expected<UniqueVoidPtr, std::string> LoadFromRuntimePipeline(const std::string& Name, std::type_index RuntimeType, std::any Params = {});
 
     struct Impl;
     std::unique_ptr<Impl> m_Impl;

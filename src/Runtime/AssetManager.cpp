@@ -309,7 +309,7 @@ namespace SnAPI::AssetPipeline
     return AllAssets;
   }
 
-  std::expected<UniqueVoidPtr, std::string> AssetManager::LoadAnyByName(const std::string& Name, std::type_index RuntimeType)
+  std::expected<UniqueVoidPtr, std::string> AssetManager::LoadAnyByName(const std::string& Name, std::type_index RuntimeType, std::any Params)
   {
     // Find the asset in mounted packs
     auto [Reader, Info, Pack] = m_Impl->FindPackForAssetByName(Name);
@@ -320,7 +320,7 @@ namespace SnAPI::AssetPipeline
       auto PipeResult = TryPipelineSource(Name);
       if (PipeResult.has_value())
       {
-        return LoadFromRuntimePipeline(Name, RuntimeType);
+        return LoadFromRuntimePipeline(Name, RuntimeType, std::move(Params));
       }
     }
 
@@ -357,13 +357,14 @@ namespace SnAPI::AssetPipeline
                              .Info = Info,
                              .LoadBulk = [Reader, Id = Info.Id](uint32_t Index) { return Reader->LoadBulkChunk(Id, Index); },
                              .GetBulkInfo = [Reader, Id = Info.Id](uint32_t Index) { return Reader->GetBulkChunkInfo(Id, Index); },
-                             .Registry = m_Impl->Engine->GetRegistry()};
+                             .Registry = m_Impl->Engine->GetRegistry(),
+                             .Params = std::move(Params)};
 
     // Invoke factory
     return Factory->Load(Context);
   }
 
-  std::expected<UniqueVoidPtr, std::string> AssetManager::LoadAnyById(AssetId Id, std::type_index RuntimeType)
+  std::expected<UniqueVoidPtr, std::string> AssetManager::LoadAnyById(AssetId Id, std::type_index RuntimeType, std::any Params)
   {
     // Find the asset
     auto [Reader, Pack] = m_Impl->FindPackForAsset(Id);
@@ -408,7 +409,8 @@ namespace SnAPI::AssetPipeline
                              .Info = Info,
                              .LoadBulk = [Reader, Id](uint32_t Index) { return Reader->LoadBulkChunk(Id, Index); },
                              .GetBulkInfo = [Reader, Id](uint32_t Index) { return Reader->GetBulkChunkInfo(Id, Index); },
-                             .Registry = m_Impl->Engine->GetRegistry()};
+                             .Registry = m_Impl->Engine->GetRegistry(),
+                             .Params = std::move(Params)};
 
     // Invoke factory
     return Factory->Load(Context);
@@ -620,7 +622,7 @@ namespace SnAPI::AssetPipeline
   }
 
   std::expected<UniqueVoidPtr, std::string> AssetManager::LoadFromRuntimePipeline(
-      const std::string& Name, std::type_index RuntimeType)
+      const std::string& Name, std::type_index RuntimeType, std::any Params)
   {
     auto AssetResult = m_Impl->Engine->GetCookedAsset(Name);
     if (!AssetResult.has_value())
@@ -677,7 +679,8 @@ namespace SnAPI::AssetPipeline
               .UncompressedSize = BulkChunks[Index].Bytes.size(),
           };
         },
-        .Registry = m_Impl->Engine->GetRegistry()};
+        .Registry = m_Impl->Engine->GetRegistry(),
+        .Params = std::move(Params)};
 
     return Factory->Load(Context);
   }

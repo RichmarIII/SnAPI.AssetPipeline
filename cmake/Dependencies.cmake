@@ -56,6 +56,22 @@ FetchContent_Declare(
     GIT_TAG        v3.5.0
 )
 
+# Compressonator - BCn texture compression (MIT)
+FetchContent_Declare(
+    compressonator
+    GIT_REPOSITORY https://github.com/GPUOpen-Tools/compressonator.git
+    GIT_TAG        V4.5.52
+    GIT_SHALLOW    TRUE
+)
+
+# astc-encoder - ASTC texture compression (Apache-2.0)
+FetchContent_Declare(
+    astcencoder
+    GIT_REPOSITORY https://github.com/ARM-software/astc-encoder.git
+    GIT_TAG        4.8.0
+    GIT_SHALLOW    TRUE
+)
+
 # GLFW - Windowing for examples (Zlib)
 FetchContent_Declare(
     glfw
@@ -150,6 +166,164 @@ else()
         target_link_libraries(freeimage INTERFACE ${FREEIMAGE_LIBRARY})
         set(FREEIMAGE_FOUND TRUE CACHE BOOL "FreeImage found" FORCE)
     endif()
+endif()
+
+# Compressonator - build core compression library only
+FetchContent_GetProperties(compressonator)
+if(NOT compressonator_POPULATED)
+    FetchContent_Populate(compressonator)
+endif()
+
+# Build Compressonator's core compression SDK as a static library
+# Source structure mirrors cmp_compressonatorlib/CMakeLists.txt
+set(CMP_LIB_DIR ${compressonator_SOURCE_DIR}/cmp_compressonatorlib)
+
+file(GLOB_RECURSE CMP_CODEC_SOURCES
+    ${CMP_LIB_DIR}/apc/*.cpp
+    ${CMP_LIB_DIR}/atc/*.cpp
+    ${CMP_LIB_DIR}/ati/*.cpp
+    ${CMP_LIB_DIR}/ati/*.c
+    ${CMP_LIB_DIR}/basis/*.cpp
+    ${CMP_LIB_DIR}/bc6h/*.cpp
+    ${CMP_LIB_DIR}/bc7/*.cpp
+    ${CMP_LIB_DIR}/block/*.cpp
+    ${CMP_LIB_DIR}/buffer/*.cpp
+    ${CMP_LIB_DIR}/dxt/*.cpp
+    ${CMP_LIB_DIR}/dxtc/*.cpp
+    ${CMP_LIB_DIR}/dxtc/*.c
+    ${CMP_LIB_DIR}/etc/*.cpp
+    ${CMP_LIB_DIR}/etc/etcpack/*.cpp
+    ${CMP_LIB_DIR}/etc/etcpack/*.cxx
+    ${CMP_LIB_DIR}/gt/*.cpp
+    ${CMP_LIB_DIR}/common/*.cpp
+)
+
+# Root-level library sources
+set(CMP_ROOT_SOURCES
+    ${CMP_LIB_DIR}/compress.cpp
+    ${CMP_LIB_DIR}/compressonator.cpp
+)
+
+# cmp_framework common sources (needed for mip generation, format conversion)
+file(GLOB CMP_FRAMEWORK_SOURCES
+    ${compressonator_SOURCE_DIR}/cmp_framework/common/*.cpp
+    ${compressonator_SOURCE_DIR}/cmp_framework/common/half/*.cpp
+)
+
+# applications/_plugins/common sources (atiformats, codec_common, format_conversion)
+set(CMP_PLUGIN_COMMON_SOURCES
+    ${compressonator_SOURCE_DIR}/applications/_plugins/common/atiformats.cpp
+    ${compressonator_SOURCE_DIR}/applications/_plugins/common/format_conversion.cpp
+    ${compressonator_SOURCE_DIR}/applications/_plugins/common/codec_common.cpp
+    ${compressonator_SOURCE_DIR}/applications/_plugins/common/texture_utils.cpp
+    ${compressonator_SOURCE_DIR}/applications/_libs/cmp_math/cpu_extensions.cpp
+    ${compressonator_SOURCE_DIR}/applications/_libs/cmp_math/cmp_math_common.cpp
+)
+
+# cmp_core sources (dispatcher + SIMD variants)
+set(CMP_CORE_SOURCES
+    ${compressonator_SOURCE_DIR}/cmp_core/source/cmp_core.cpp
+    ${compressonator_SOURCE_DIR}/cmp_core/source/core_simd_sse.cpp
+    ${compressonator_SOURCE_DIR}/cmp_core/source/core_simd_avx.cpp
+    ${compressonator_SOURCE_DIR}/cmp_core/source/core_simd_avx512.cpp
+)
+
+# Set per-file SIMD compile flags for cmp_core SIMD sources
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64|amd64)")
+    set_source_files_properties(
+        ${compressonator_SOURCE_DIR}/cmp_core/source/core_simd_sse.cpp
+        PROPERTIES COMPILE_FLAGS "-msse4.1"
+    )
+    set_source_files_properties(
+        ${compressonator_SOURCE_DIR}/cmp_core/source/core_simd_avx.cpp
+        PROPERTIES COMPILE_FLAGS "-mavx2 -mf16c"
+    )
+    set_source_files_properties(
+        ${compressonator_SOURCE_DIR}/cmp_core/source/core_simd_avx512.cpp
+        PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512bw -mavx512vl"
+    )
+endif()
+
+if(EXISTS ${CMP_LIB_DIR}/compressonator.cpp)
+    add_library(cmp_compressonatorlib STATIC
+        ${CMP_ROOT_SOURCES}
+        ${CMP_CODEC_SOURCES}
+        ${CMP_FRAMEWORK_SOURCES}
+        ${CMP_PLUGIN_COMMON_SOURCES}
+        ${CMP_CORE_SOURCES}
+    )
+    target_include_directories(cmp_compressonatorlib PUBLIC
+        ${CMP_LIB_DIR}
+        ${CMP_LIB_DIR}/common
+        ${CMP_LIB_DIR}/apc
+        ${CMP_LIB_DIR}/atc
+        ${CMP_LIB_DIR}/ati
+        ${CMP_LIB_DIR}/basis
+        ${CMP_LIB_DIR}/bc6h
+        ${CMP_LIB_DIR}/bc7
+        ${CMP_LIB_DIR}/block
+        ${CMP_LIB_DIR}/buffer
+        ${CMP_LIB_DIR}/dxt
+        ${CMP_LIB_DIR}/dxtc
+        ${CMP_LIB_DIR}/etc
+        ${CMP_LIB_DIR}/etc/etcpack
+        ${CMP_LIB_DIR}/gt
+        ${compressonator_SOURCE_DIR}/cmp_framework/common
+        ${compressonator_SOURCE_DIR}/cmp_framework/common/half
+        ${compressonator_SOURCE_DIR}/applications/_plugins/common
+        ${compressonator_SOURCE_DIR}/applications/_libs/cmp_math
+        ${compressonator_SOURCE_DIR}/cmp_core/source
+        ${compressonator_SOURCE_DIR}/cmp_core/shaders
+    )
+    set_target_properties(cmp_compressonatorlib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_compile_definitions(cmp_compressonatorlib PRIVATE USE_ASPM_CODE=0)
+    set(COMPRESSONATOR_FOUND TRUE CACHE BOOL "Compressonator found" FORCE)
+else()
+    message(WARNING "Compressonator sources not found at expected paths. TextureCompressor BCn support may be limited.")
+    add_library(cmp_compressonatorlib INTERFACE)
+    set(COMPRESSONATOR_FOUND FALSE CACHE BOOL "Compressonator found" FORCE)
+endif()
+
+# astc-encoder - build as static library
+FetchContent_GetProperties(astcencoder)
+if(NOT astcencoder_POPULATED)
+    FetchContent_Populate(astcencoder)
+endif()
+
+# Only include library sources (astcenc_*), not CLI sources (astcenccli_*)
+file(GLOB ASTCENC_SOURCES ${astcencoder_SOURCE_DIR}/Source/astcenc_*.cpp)
+if(ASTCENC_SOURCES)
+    add_library(astcenc STATIC ${ASTCENC_SOURCES})
+    target_include_directories(astcenc PUBLIC ${astcencoder_SOURCE_DIR}/Source)
+    set_target_properties(astcenc PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+    # Enable SIMD acceleration based on host architecture
+    include(CheckCXXCompilerFlag)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64|amd64)")
+        check_cxx_compiler_flag("-msse4.1" HAS_SSE41)
+        check_cxx_compiler_flag("-mavx2" HAS_AVX2)
+        if(HAS_AVX2)
+            target_compile_definitions(astcenc PRIVATE ASTCENC_SSE=41 ASTCENC_AVX=2 ASTCENC_POPCNT=1 ASTCENC_F16C=1)
+            target_compile_options(astcenc PRIVATE -mavx2 -mpopcnt -mf16c)
+        elseif(HAS_SSE41)
+            target_compile_definitions(astcenc PRIVATE ASTCENC_SSE=41)
+            target_compile_options(astcenc PRIVATE -msse4.1)
+        else()
+            target_compile_definitions(astcenc PRIVATE ASTCENC_SSE=20)
+        endif()
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "(aarch64|arm64|ARM64)")
+        target_compile_definitions(astcenc PRIVATE ASTCENC_NEON=1)
+    else()
+        target_compile_definitions(astcenc PRIVATE ASTCENC_SSE=0 ASTCENC_AVX=0 ASTCENC_NEON=0)
+    endif()
+
+    # Do NOT define ASTCENC_DECOMPRESS_ONLY - it uses #if defined() checks
+    # Leaving it undefined enables full compression support
+    set(ASTCENC_FOUND TRUE CACHE BOOL "astc-encoder found" FORCE)
+else()
+    message(WARNING "astc-encoder sources not found. TextureCompressor ASTC support will be unavailable.")
+    add_library(astcenc INTERFACE)
+    set(ASTCENC_FOUND FALSE CACHE BOOL "astc-encoder found" FORCE)
 endif()
 
 # Catch2
