@@ -15,17 +15,17 @@ namespace SnAPI::AssetPipeline
   // Forward declarations from Compression.cpp
   namespace Pack
   {
-    std::vector<uint8_t> Compress(const uint8_t* Data, size_t Size, ESnPakCompression Mode);
-    std::vector<uint8_t> CompressMax(const uint8_t* Data, size_t Size, ESnPakCompression Mode);
+
+
   } // namespace Pack
 
   struct AssetPackWriter::Impl
   {
       std::vector<AssetPackEntry> Assets;
       Pack::ESnPakCompression Compression = Pack::ESnPakCompression::Zstd;
-      bool bMaxCompression = false;
+      Pack::ESnPakCompressionLevel CompressionLevel = Pack::ESnPakCompressionLevel::Default;
 
-      Pack::ESnPakCompression ToInternalCompression(EPackCompression Mode) const
+      static Pack::ESnPakCompression ToInternalCompression(const EPackCompression Mode)
       {
         switch (Mode)
         {
@@ -33,16 +33,36 @@ namespace SnAPI::AssetPipeline
             return Pack::ESnPakCompression::None;
           case EPackCompression::LZ4:
             return Pack::ESnPakCompression::LZ4;
+          case EPackCompression::LZ4HC:
+            return Pack::ESnPakCompression::LZ4HC;
           case EPackCompression::Zstd:
             return Pack::ESnPakCompression::Zstd;
+          case EPackCompression::ZstdFast:
+            return Pack::ESnPakCompression::ZstdFast;
           default:
             return Pack::ESnPakCompression::Zstd;
         }
       }
 
+      static Pack::ESnPakCompressionLevel ToInternalCompressionLevel(const EPackCompressionLevel Level)
+      {
+        switch (Level)
+        {
+          case EPackCompressionLevel::Fast:
+            return Pack::ESnPakCompressionLevel::Fast;
+          case EPackCompressionLevel::High:
+            return Pack::ESnPakCompressionLevel::High;
+          case EPackCompressionLevel::Max:
+            return Pack::ESnPakCompressionLevel::Max;
+          case EPackCompressionLevel::Default:
+          default:
+            return Pack::ESnPakCompressionLevel::Default;
+        }
+      }
+
       std::vector<uint8_t> CompressData(const uint8_t* Data, size_t Size) const
       {
-        return bMaxCompression ? Pack::CompressMax(Data, Size, Compression) : Pack::Compress(Data, Size, Compression);
+        return Pack::Compress(Data, Size, Compression, CompressionLevel);
       }
 
       static std::vector<uint8_t> BuildStringTableBlock(const std::vector<std::string>& Strings)
@@ -110,10 +130,10 @@ namespace SnAPI::AssetPipeline
           std::memcpy(Result.data() + sizeof(Header) + EntriesSize, BulkEntries.data(), BulkEntriesSize);
         }
 
-        XXH128_hash_t Hash = XXH3_128bits(Result.data() + sizeof(Header), EntriesSize + BulkEntriesSize);
+        auto [low64, high64] = XXH3_128bits(Result.data() + sizeof(Header), EntriesSize + BulkEntriesSize);
         auto* HeaderPtr = reinterpret_cast<Pack::SnPakIndexHeaderV1*>(Result.data());
-        HeaderPtr->EntriesHashHi = Hash.high64;
-        HeaderPtr->EntriesHashLo = Hash.low64;
+        HeaderPtr->EntriesHashHi = high64;
+        HeaderPtr->EntriesHashLo = low64;
 
         return Result;
       }
@@ -126,14 +146,19 @@ namespace SnAPI::AssetPipeline
   AssetPackWriter::AssetPackWriter(AssetPackWriter&&) noexcept = default;
   AssetPackWriter& AssetPackWriter::operator=(AssetPackWriter&&) noexcept = default;
 
-  void AssetPackWriter::SetCompression(EPackCompression Mode) const
+  void AssetPackWriter::SetCompression(const EPackCompression Mode) const
   {
-    m_Impl->Compression = m_Impl->ToInternalCompression(Mode);
+    m_Impl->Compression = Impl::ToInternalCompression(Mode);
+  }
+
+  void AssetPackWriter::SetCompressionLevel(const EPackCompressionLevel Level) const
+  {
+    m_Impl->CompressionLevel = Impl::ToInternalCompressionLevel(Level);
   }
 
   void AssetPackWriter::SetMaxCompression(bool bEnable) const
   {
-    m_Impl->bMaxCompression = bEnable;
+    m_Impl->CompressionLevel = bEnable ? Pack::ESnPakCompressionLevel::Max : Pack::ESnPakCompressionLevel::Default;
   }
 
   void AssetPackWriter::AddAsset(AssetPackEntry Entry) const
@@ -189,7 +214,7 @@ namespace SnAPI::AssetPipeline
       {
         throw std::runtime_error("StringTable frozen: attempted to add new string '" + Str + "'");
       }
-      uint32_t Id = static_cast<uint32_t>(StringTable.size());
+      auto Id = static_cast<uint32_t>(StringTable.size());
       StringTable.push_back(Str);
       StringToId[Str] = Id;
       return Id;
@@ -226,7 +251,7 @@ namespace SnAPI::AssetPipeline
 
     // Write string table
     uint64_t StringTableOffset = CurrentOffset;
-    std::vector<uint8_t> StringTableData = m_Impl->BuildStringTableBlock(StringTable);
+    std::vector<uint8_t> StringTableData = Impl::BuildStringTableBlock(StringTable);
     File.write(reinterpret_cast<const char*>(StringTableData.data()), StringTableData.size());
     CurrentOffset += StringTableData.size();
 
@@ -271,6 +296,7 @@ namespace SnAPI::AssetPipeline
       ChunkHeader.SchemaVersion = Asset.Cooked.SchemaVersion;
       ChunkHeader.Compression = static_cast<uint8_t>(m_Impl->Compression);
       ChunkHeader.ChunkKind = static_cast<uint8_t>(Pack::ESnPakChunkKind::MainPayload);
+      ChunkHeader.Reserved0 = static_cast<uint16_t>(m_Impl->CompressionLevel);
       ChunkHeader.SizeCompressed = CompressedPayload.size();
       ChunkHeader.SizeUncompressed = Asset.Cooked.Bytes.size();
 
@@ -282,6 +308,7 @@ namespace SnAPI::AssetPipeline
       Entry.PayloadChunkSizeCompressed = sizeof(ChunkHeader) + CompressedPayload.size();
       Entry.PayloadChunkSizeUncompressed = Asset.Cooked.Bytes.size();
       Entry.Compression = static_cast<uint8_t>(m_Impl->Compression);
+      Entry.Reserved0 = static_cast<uint16_t>(m_Impl->CompressionLevel);
       Entry.PayloadHashHi = PayloadHash.high64;
       Entry.PayloadHashLo = PayloadHash.low64;
 
@@ -300,8 +327,8 @@ namespace SnAPI::AssetPipeline
         {
           auto& Bulk = Asset.Bulk[BulkIdx];
           Pack::ESnPakCompression BulkCompression = Bulk.bCompress ? m_Impl->Compression : Pack::ESnPakCompression::None;
-          std::vector<uint8_t> CompressedBulk = m_Impl->bMaxCompression ? Pack::CompressMax(Bulk.Bytes.data(), Bulk.Bytes.size(), BulkCompression)
-                                                                        : Pack::Compress(Bulk.Bytes.data(), Bulk.Bytes.size(), BulkCompression);
+          Pack::ESnPakCompressionLevel BulkLevel = Bulk.bCompress ? m_Impl->CompressionLevel : Pack::ESnPakCompressionLevel::Default;
+          std::vector<uint8_t> CompressedBulk = Pack::Compress(Bulk.Bytes.data(), Bulk.Bytes.size(), BulkCompression, BulkLevel);
 
           Pack::SnPakChunkHeaderV1 BulkChunkHeader = {};
           std::memcpy(BulkChunkHeader.Magic, Pack::kChunkMagic, 4);
@@ -311,6 +338,7 @@ namespace SnAPI::AssetPipeline
           BulkChunkHeader.SchemaVersion = 0;
           BulkChunkHeader.Compression = static_cast<uint8_t>(BulkCompression);
           BulkChunkHeader.ChunkKind = static_cast<uint8_t>(Pack::ESnPakChunkKind::Bulk);
+          BulkChunkHeader.Reserved0 = static_cast<uint16_t>(BulkLevel);
           BulkChunkHeader.SizeCompressed = CompressedBulk.size();
           BulkChunkHeader.SizeUncompressed = Bulk.Bytes.size();
 
@@ -319,13 +347,14 @@ namespace SnAPI::AssetPipeline
           BulkChunkHeader.HashLo = BulkHash.low64;
 
           Pack::SnPakBulkEntryV1 BulkEntry = {};
-          uint32_t SemanticVal = static_cast<uint32_t>(Bulk.Semantic);
+          auto SemanticVal = static_cast<uint32_t>(Bulk.Semantic);
           std::memcpy(BulkEntry.Semantic, &SemanticVal, 4);
           BulkEntry.SubIndex = BulkIdx;  // Enforce SubIndex == BulkIndex (array position)
           BulkEntry.ChunkOffset = CurrentOffset;
           BulkEntry.SizeCompressed = sizeof(BulkChunkHeader) + CompressedBulk.size();
           BulkEntry.SizeUncompressed = Bulk.Bytes.size();
           BulkEntry.Compression = static_cast<uint8_t>(BulkCompression);
+          BulkEntry.Reserved0[0] = static_cast<uint8_t>(BulkLevel);
           BulkEntry.HashHi = BulkHash.high64;
           BulkEntry.HashLo = BulkHash.low64;
 
@@ -347,7 +376,7 @@ namespace SnAPI::AssetPipeline
 
     // Write index block
     uint64_t IndexOffset = CurrentOffset;
-    std::vector<uint8_t> IndexData = m_Impl->BuildIndexBlock(IndexEntries, BulkEntries);
+    std::vector<uint8_t> IndexData = Impl::BuildIndexBlock(IndexEntries, BulkEntries);
     File.write(reinterpret_cast<const char*>(IndexData.data()), IndexData.size());
     CurrentOffset += IndexData.size();
 
@@ -391,7 +420,7 @@ namespace SnAPI::AssetPipeline
 
     // FIX #5: Comprehensive header validation for AppendUpdate
     // Verify the existing pack is valid and compatible before appending
-    Pack::SnPakHeaderV1 OldHeader;
+    Pack::SnPakHeaderV1 OldHeader{};
     File.read(reinterpret_cast<char*>(&OldHeader), sizeof(OldHeader));
 
     if (!File.good())
@@ -425,8 +454,7 @@ namespace SnAPI::AssetPipeline
 
     // Validate file size against actual file size
     File.seekg(0, std::ios::end);
-    uint64_t ActualFileSize = static_cast<uint64_t>(File.tellg());
-    if (OldHeader.FileSize > ActualFileSize)
+    if (auto ActualFileSize = static_cast<uint64_t>(File.tellg()); OldHeader.FileSize > ActualFileSize)
     {
       return std::unexpected("Header FileSize (" + std::to_string(OldHeader.FileSize) +
                              ") exceeds actual file size (" + std::to_string(ActualFileSize) +
@@ -442,8 +470,7 @@ namespace SnAPI::AssetPipeline
     bool bStringTableFrozen = false;
 
     auto AddString = [&](const std::string& Str) -> uint32_t {
-      auto It = StringToId.find(Str);
-      if (It != StringToId.end())
+      if (const auto It = StringToId.find(Str); It != StringToId.end())
       {
         return It->second;
       }
@@ -451,7 +478,7 @@ namespace SnAPI::AssetPipeline
       {
         throw std::runtime_error("StringTable frozen: attempted to add new string '" + Str + "'");
       }
-      uint32_t Id = static_cast<uint32_t>(StringTable.size());
+      auto Id = static_cast<uint32_t>(StringTable.size());
       StringTable.push_back(Str);
       StringToId[Str] = Id;
       return Id;
@@ -459,7 +486,7 @@ namespace SnAPI::AssetPipeline
 
     // Lookup function for use after string table is frozen
     auto GetStringId = [&](const std::string& Str) -> uint32_t {
-      auto It = StringToId.find(Str);
+      const auto It = StringToId.find(Str);
       if (It == StringToId.end())
       {
         throw std::runtime_error("String not found in frozen table: '" + Str + "'");
@@ -478,7 +505,7 @@ namespace SnAPI::AssetPipeline
 
     // Write new string table
     uint64_t NewStringTableOffset = CurrentOffset;
-    std::vector<uint8_t> StringTableData = m_Impl->BuildStringTableBlock(StringTable);
+    std::vector<uint8_t> StringTableData = Impl::BuildStringTableBlock(StringTable);
     File.write(reinterpret_cast<const char*>(StringTableData.data()), StringTableData.size());
     CurrentOffset += StringTableData.size();
 
@@ -523,6 +550,7 @@ namespace SnAPI::AssetPipeline
       ChunkHeader.SchemaVersion = Asset.Cooked.SchemaVersion;
       ChunkHeader.Compression = static_cast<uint8_t>(m_Impl->Compression);
       ChunkHeader.ChunkKind = static_cast<uint8_t>(Pack::ESnPakChunkKind::MainPayload);
+      ChunkHeader.Reserved0 = static_cast<uint16_t>(m_Impl->CompressionLevel);
       ChunkHeader.SizeCompressed = CompressedPayload.size();
       ChunkHeader.SizeUncompressed = Asset.Cooked.Bytes.size();
 
@@ -534,6 +562,7 @@ namespace SnAPI::AssetPipeline
       Entry.PayloadChunkSizeCompressed = sizeof(ChunkHeader) + CompressedPayload.size();
       Entry.PayloadChunkSizeUncompressed = Asset.Cooked.Bytes.size();
       Entry.Compression = static_cast<uint8_t>(m_Impl->Compression);
+      Entry.Reserved0 = static_cast<uint16_t>(m_Impl->CompressionLevel);
       Entry.PayloadHashHi = PayloadHash.high64;
       Entry.PayloadHashLo = PayloadHash.low64;
 
@@ -552,8 +581,8 @@ namespace SnAPI::AssetPipeline
         {
           auto& Bulk = Asset.Bulk[BulkIdx];
           Pack::ESnPakCompression BulkCompression = Bulk.bCompress ? m_Impl->Compression : Pack::ESnPakCompression::None;
-          std::vector<uint8_t> CompressedBulk = m_Impl->bMaxCompression ? Pack::CompressMax(Bulk.Bytes.data(), Bulk.Bytes.size(), BulkCompression)
-                                                                        : Pack::Compress(Bulk.Bytes.data(), Bulk.Bytes.size(), BulkCompression);
+          Pack::ESnPakCompressionLevel BulkLevel = Bulk.bCompress ? m_Impl->CompressionLevel : Pack::ESnPakCompressionLevel::Default;
+          std::vector<uint8_t> CompressedBulk = Pack::Compress(Bulk.Bytes.data(), Bulk.Bytes.size(), BulkCompression, BulkLevel);
 
           Pack::SnPakChunkHeaderV1 BulkChunkHeader = {};
           std::memcpy(BulkChunkHeader.Magic, Pack::kChunkMagic, 4);
@@ -563,6 +592,7 @@ namespace SnAPI::AssetPipeline
           BulkChunkHeader.SchemaVersion = 0;
           BulkChunkHeader.Compression = static_cast<uint8_t>(BulkCompression);
           BulkChunkHeader.ChunkKind = static_cast<uint8_t>(Pack::ESnPakChunkKind::Bulk);
+          BulkChunkHeader.Reserved0 = static_cast<uint16_t>(BulkLevel);
           BulkChunkHeader.SizeCompressed = CompressedBulk.size();
           BulkChunkHeader.SizeUncompressed = Bulk.Bytes.size();
 
@@ -571,13 +601,14 @@ namespace SnAPI::AssetPipeline
           BulkChunkHeader.HashLo = BulkHash.low64;
 
           Pack::SnPakBulkEntryV1 BulkEntry = {};
-          uint32_t SemanticVal = static_cast<uint32_t>(Bulk.Semantic);
+          auto SemanticVal = static_cast<uint32_t>(Bulk.Semantic);
           std::memcpy(BulkEntry.Semantic, &SemanticVal, 4);
           BulkEntry.SubIndex = BulkIdx;  // Enforce SubIndex == BulkIndex (array position)
           BulkEntry.ChunkOffset = CurrentOffset;
           BulkEntry.SizeCompressed = sizeof(BulkChunkHeader) + CompressedBulk.size();
           BulkEntry.SizeUncompressed = Bulk.Bytes.size();
           BulkEntry.Compression = static_cast<uint8_t>(BulkCompression);
+          BulkEntry.Reserved0[0] = static_cast<uint8_t>(BulkLevel);
           BulkEntry.HashHi = BulkHash.high64;
           BulkEntry.HashLo = BulkHash.low64;
 
@@ -599,7 +630,7 @@ namespace SnAPI::AssetPipeline
 
     // Write new index block (with reference to previous)
     uint64_t NewIndexOffset = CurrentOffset;
-    std::vector<uint8_t> IndexData = m_Impl->BuildIndexBlock(IndexEntries, BulkEntries, OldHeader.IndexOffset, OldHeader.IndexSize);
+    std::vector<uint8_t> IndexData = Impl::BuildIndexBlock(IndexEntries, BulkEntries, OldHeader.IndexOffset, OldHeader.IndexSize);
     File.write(reinterpret_cast<const char*>(IndexData.data()), IndexData.size());
     CurrentOffset += IndexData.size();
 

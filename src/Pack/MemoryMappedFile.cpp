@@ -525,17 +525,15 @@ namespace SnAPI::AssetPipeline
     }
 
     // Convert to ESnPakCompression
-    Pack::ESnPakCompression Mode;
-    if (CompressionType == 1)
+    Pack::ESnPakCompression Mode = static_cast<Pack::ESnPakCompression>(CompressionType);
+    switch (Mode)
     {
-      Mode = Pack::ESnPakCompression::LZ4;
-    }
-    else if (CompressionType == 2)
-    {
-      Mode = Pack::ESnPakCompression::Zstd;
-    }
-    else
-    {
+    case Pack::ESnPakCompression::LZ4:
+    case Pack::ESnPakCompression::LZ4HC:
+    case Pack::ESnPakCompression::Zstd:
+    case Pack::ESnPakCompression::ZstdFast:
+      break;
+    default:
       return std::unexpected("Unknown compression type: " + std::to_string(CompressionType));
     }
 

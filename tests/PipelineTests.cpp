@@ -183,7 +183,8 @@ TEST_CASE("PipelineBuildConfig defaults", "[pipeline]")
     REQUIRE(Config.OutputPackPath.empty());
     REQUIRE(Config.bDeterministicAssetIds == true);
     REQUIRE(Config.bEnableAppendUpdates == true);
-    REQUIRE(Config.CompressionMode == PipelineBuildConfig::ECompressionMode::Zstd);
+    REQUIRE(Config.Compression == EPackCompression::Zstd);
+    REQUIRE(Config.CompressionLevel == EPackCompressionLevel::Default);
     REQUIRE(Config.ParallelJobs == 0);
     REQUIRE(Config.bVerbose == false);
 }

@@ -27,6 +27,16 @@ namespace SnAPI::AssetPipeline::Pack
     None = 0,
     LZ4 = 1,
     Zstd = 2,
+    LZ4HC = 3,
+    ZstdFast = 4,
+  };
+
+  enum class ESnPakCompressionLevel : uint8_t
+  {
+    Default = 0,
+    Fast = 1,
+    High = 2,
+    Max = 3,
   };
 
   // Header flags
@@ -145,7 +155,7 @@ namespace SnAPI::AssetPipeline::Pack
 
       uint8_t Compression; // ESnPakCompression
       uint8_t Flags;       // bit0=HasBulk
-      uint16_t Reserved0;
+      uint16_t Reserved0;  // Compression level (low byte), reserved (high byte)
 
       uint32_t BulkFirstIndex; // into bulk array
       uint32_t BulkCount;
@@ -173,7 +183,7 @@ namespace SnAPI::AssetPipeline::Pack
       uint64_t SizeUncompressed;
 
       uint8_t Compression; // ESnPakCompression
-      uint8_t Reserved0[7];
+      uint8_t Reserved0[7]; // Compression level in Reserved0[0]
 
       uint64_t HashHi;
       uint64_t HashLo;
@@ -192,7 +202,7 @@ namespace SnAPI::AssetPipeline::Pack
 
       uint8_t Compression; // ESnPakCompression
       uint8_t ChunkKind;   // ESnPakChunkKind
-      uint16_t Reserved0;
+      uint16_t Reserved0;  // Compression level (low byte), reserved (high byte)
 
       uint64_t SizeCompressed;
       uint64_t SizeUncompressed;
@@ -230,6 +240,7 @@ namespace SnAPI::AssetPipeline::Pack
   }
 
   // Compression/decompression functions
+  std::vector<uint8_t> Compress(const uint8_t* Data, size_t Size, ESnPakCompression Mode, ESnPakCompressionLevel Level);
   std::vector<uint8_t> Compress(const uint8_t* Data, size_t Size, ESnPakCompression Mode);
   std::vector<uint8_t> CompressMax(const uint8_t* Data, size_t Size, ESnPakCompression Mode);
   std::vector<uint8_t> Decompress(const uint8_t* Data, size_t CompressedSize, size_t UncompressedSize, ESnPakCompression Mode);

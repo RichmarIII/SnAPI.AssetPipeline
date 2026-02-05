@@ -75,6 +75,16 @@ TEST_CASE("ESnPakCompression values", "[pack]")
     REQUIRE(static_cast<uint8_t>(ESnPakCompression::None) == 0);
     REQUIRE(static_cast<uint8_t>(ESnPakCompression::LZ4) == 1);
     REQUIRE(static_cast<uint8_t>(ESnPakCompression::Zstd) == 2);
+    REQUIRE(static_cast<uint8_t>(ESnPakCompression::LZ4HC) == 3);
+    REQUIRE(static_cast<uint8_t>(ESnPakCompression::ZstdFast) == 4);
+}
+
+TEST_CASE("ESnPakCompressionLevel values", "[pack]")
+{
+    REQUIRE(static_cast<uint8_t>(ESnPakCompressionLevel::Default) == 0);
+    REQUIRE(static_cast<uint8_t>(ESnPakCompressionLevel::Fast) == 1);
+    REQUIRE(static_cast<uint8_t>(ESnPakCompressionLevel::High) == 2);
+    REQUIRE(static_cast<uint8_t>(ESnPakCompressionLevel::Max) == 3);
 }
 
 TEST_CASE("CopyUuid helper", "[pack]")

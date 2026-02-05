@@ -22,7 +22,8 @@ void PrintUsage(const char* ProgramName)
             << "  -s, --source <dir>       Add source directory (can be used multiple times)\n"
             << "  -o, --output <file>      Output .snpak file path\n"
             << "  -p, --plugin <file>      Load plugin DLL/SO (can be used multiple times)\n"
-            << "  -c, --compression <mode> Compression mode: none, lz4, zstd (default: zstd)\n"
+            << "  -c, --compression <mode> Compression mode: none, lz4, lz4hc, zstd, zstdfast (default: zstd)\n"
+            << "  --compression-level <level> Compression level: fast, default, high, max (default: default)\n"
             << "  -v, --verbose            Enable verbose output\n"
             << "  --max-compression        Use maximum compression (slower)\n"
             << std::endl;
@@ -187,19 +188,52 @@ int main(int argc, char* argv[])
       std::string Mode = argv[++i];
       if (Mode == "none")
       {
-        Config.CompressionMode = PipelineBuildConfig::ECompressionMode::None;
+        Config.Compression = EPackCompression::None;
       }
       else if (Mode == "lz4")
       {
-        Config.CompressionMode = PipelineBuildConfig::ECompressionMode::LZ4;
+        Config.Compression = EPackCompression::LZ4;
+      }
+      else if (Mode == "lz4hc")
+      {
+        Config.Compression = EPackCompression::LZ4HC;
       }
       else if (Mode == "zstd")
       {
-        Config.CompressionMode = PipelineBuildConfig::ECompressionMode::Zstd;
+        Config.Compression = EPackCompression::Zstd;
+      }
+      else if (Mode == "zstdfast")
+      {
+        Config.Compression = EPackCompression::ZstdFast;
       }
       else
       {
         std::cerr << "Unknown compression mode: " << Mode << std::endl;
+        return 1;
+      }
+    }
+    else if (Arg == "--compression-level" && i + 1 < argc)
+    {
+      std::string Level = argv[++i];
+      if (Level == "fast")
+      {
+        Config.CompressionLevel = EPackCompressionLevel::Fast;
+      }
+      else if (Level == "default")
+      {
+        Config.CompressionLevel = EPackCompressionLevel::Default;
+      }
+      else if (Level == "high")
+      {
+        Config.CompressionLevel = EPackCompressionLevel::High;
+      }
+      else if (Level == "max")
+      {
+        Config.CompressionLevel = EPackCompressionLevel::Max;
+      }
+      else
+      {
+        std::cerr << "Unknown compression level: " << Level << std::endl;
         return 1;
       }
     }
@@ -209,7 +243,7 @@ int main(int argc, char* argv[])
     }
     else if (Arg == "--max-compression")
     {
-      Config.CompressionMode = PipelineBuildConfig::ECompressionMode::ZstdMax;
+      Config.CompressionLevel = EPackCompressionLevel::Max;
     }
     else if (!Arg.empty() && Arg[0] != '-')
     {

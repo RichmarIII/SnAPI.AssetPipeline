@@ -29,6 +29,90 @@ namespace SnAPI::AssetPipeline
   // Forward declarations
   std::unique_ptr<IPipelineContext> CreatePipelineContext(PayloadRegistry* Registry, const std::unordered_map<std::string, std::string>* Options);
 
+  namespace
+  {
+    bool TryParseCompressionMode(const std::string& Mode, EPackCompression& Out)
+    {
+      if (Mode == "none")
+      {
+        Out = EPackCompression::None;
+        return true;
+      }
+      if (Mode == "lz4")
+      {
+        Out = EPackCompression::LZ4;
+        return true;
+      }
+      if (Mode == "lz4hc")
+      {
+        Out = EPackCompression::LZ4HC;
+        return true;
+      }
+      if (Mode == "zstd")
+      {
+        Out = EPackCompression::Zstd;
+        return true;
+      }
+      if (Mode == "zstdfast")
+      {
+        Out = EPackCompression::ZstdFast;
+        return true;
+      }
+      return false;
+    }
+
+    bool TryParseCompressionLevel(const std::string& Level, EPackCompressionLevel& Out)
+    {
+      if (Level == "fast")
+      {
+        Out = EPackCompressionLevel::Fast;
+        return true;
+      }
+      if (Level == "default")
+      {
+        Out = EPackCompressionLevel::Default;
+        return true;
+      }
+      if (Level == "high")
+      {
+        Out = EPackCompressionLevel::High;
+        return true;
+      }
+      if (Level == "max")
+      {
+        Out = EPackCompressionLevel::Max;
+        return true;
+      }
+      return false;
+    }
+
+    void ApplyCompressionOptions(const PipelineBuildConfig& Config, AssetPackWriter& Writer)
+    {
+      Writer.SetCompression(Config.Compression);
+      Writer.SetCompressionLevel(Config.CompressionLevel);
+
+      auto It = Config.BuildOptions.find("compression");
+      if (It != Config.BuildOptions.end())
+      {
+        EPackCompression Mode = Config.Compression;
+        if (TryParseCompressionMode(It->second, Mode))
+        {
+          Writer.SetCompression(Mode);
+        }
+      }
+
+      It = Config.BuildOptions.find("compression_level");
+      if (It != Config.BuildOptions.end())
+      {
+        EPackCompressionLevel Level = Config.CompressionLevel;
+        if (TryParseCompressionLevel(It->second, Level))
+        {
+          Writer.SetCompressionLevel(Level);
+        }
+      }
+    }
+  } // namespace
+
   // Incremental cache for tracking built assets
   class IncrementalCache
   {
@@ -508,21 +592,7 @@ namespace SnAPI::AssetPipeline
     // Create pack writer
     AssetPackWriter Writer;
 
-    // Set compression from config
-    if (m_Impl->Config.BuildOptions.count("compression"))
-    {
-      const auto& Comp = m_Impl->Config.BuildOptions.at("compression");
-      if (Comp == "none")
-        Writer.SetCompression(EPackCompression::None);
-      else if (Comp == "lz4")
-        Writer.SetCompression(EPackCompression::LZ4);
-      else
-        Writer.SetCompression(EPackCompression::Zstd);
-    }
-    else
-    {
-      Writer.SetCompression(EPackCompression::Zstd);
-    }
+    ApplyCompressionOptions(m_Impl->Config, Writer);
 
     // Process each source
     for (const auto& Source : Sources)
@@ -603,7 +673,7 @@ namespace SnAPI::AssetPipeline
     bool bAppend = std::filesystem::exists(m_Impl->Config.OutputPackPath);
 
     AssetPackWriter Writer;
-    Writer.SetCompression(EPackCompression::Zstd);
+    ApplyCompressionOptions(m_Impl->Config, Writer);
 
     // If appending, load existing pack first
     if (bAppend)
@@ -726,7 +796,7 @@ namespace SnAPI::AssetPipeline
 
     // Create writer
     AssetPackWriter Writer;
-    Writer.SetCompression(EPackCompression::Zstd);
+    ApplyCompressionOptions(m_Impl->Config, Writer);
 
     // Process each source
     for (const auto& Source : Sources)
@@ -876,19 +946,7 @@ namespace SnAPI::AssetPipeline
 
     // Create writer with configured compression
     AssetPackWriter Writer;
-    switch (m_Impl->Config.CompressionMode)
-    {
-    case PipelineBuildConfig::ECompressionMode::None:
-      Writer.SetCompression(EPackCompression::None);
-      break;
-    case PipelineBuildConfig::ECompressionMode::LZ4:
-      Writer.SetCompression(EPackCompression::LZ4);
-      break;
-    case PipelineBuildConfig::ECompressionMode::Zstd:
-    case PipelineBuildConfig::ECompressionMode::ZstdMax:
-      Writer.SetCompression(EPackCompression::Zstd);
-      break;
-    }
+    ApplyCompressionOptions(m_Impl->Config, Writer);
 
     // Add all dirty assets
     for (auto& [Name, Asset] : m_Impl->CookedAssets)

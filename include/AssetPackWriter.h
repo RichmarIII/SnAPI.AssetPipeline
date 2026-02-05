@@ -19,7 +19,17 @@ enum class EPackCompression
 {
     None,
     LZ4,
+    LZ4HC,
     Zstd,
+    ZstdFast,
+};
+
+enum class EPackCompressionLevel
+{
+    Default,
+    Fast,
+    High,
+    Max,
 };
 
 // Entry to add to an asset pack
@@ -43,7 +53,10 @@ public:
     // Set compression mode (default: Zstd)
     void SetCompression(EPackCompression Mode) const;
 
-    // Enable maximum compression (slower, smaller output)
+    // Set compression level (default: Default)
+    void SetCompressionLevel(EPackCompressionLevel Level) const;
+
+    // Enable maximum compression level (slower, smaller output)
     void SetMaxCompression(bool bEnable) const;
 
     // Add an asset to be written

@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "AssetPackWriter.h"
 #include "Export.h"
 
 namespace SnAPI::AssetPipeline
@@ -34,14 +35,8 @@ struct SNAPI_ASSETPIPELINE_API PipelineBuildConfig
     std::string CacheDatabasePath;
 
     // Compression settings
-    enum class ECompressionMode
-    {
-        None,
-        LZ4,
-        Zstd,
-        ZstdMax  // Maximum compression
-    };
-    ECompressionMode CompressionMode = ECompressionMode::Zstd;
+    EPackCompression Compression = EPackCompression::Zstd;
+    EPackCompressionLevel CompressionLevel = EPackCompressionLevel::Default;
 
     // Number of parallel jobs (0 = auto)
     uint32_t ParallelJobs = 0;

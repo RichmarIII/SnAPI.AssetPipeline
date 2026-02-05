@@ -49,7 +49,7 @@ The SnPAK format exists to solve several critical problems in game asset distrib
 
 2. **Data Integrity**: Provides cryptographic hash verification (XXH3-128) for all data blocks, ensuring assets are not corrupted during transmission or storage.
 
-3. **Compression**: Supports multiple compression algorithms (LZ4, Zstd) to reduce storage requirements while maintaining fast decompression speeds suitable for real-time loading.
+3. **Compression**: Supports multiple compression algorithms (LZ4, LZ4HC, Zstd, ZstdFast) to reduce storage requirements while maintaining fast decompression speeds suitable for real-time loading.
 
 4. **Streaming Support**: Designed with random access in mind, allowing individual assets to be loaded without reading the entire file.
 
@@ -630,6 +630,8 @@ The compression algorithm used for this chunk's data:
 | `0` | None | Data is stored uncompressed |
 | `1` | LZ4 | LZ4 compression (fast decompression) |
 | `2` | Zstd | Zstandard compression (better ratio) |
+| `3` | LZ4HC | LZ4 high compression (slower) |
+| `4` | ZstdFast | Zstandard fast mode (negative levels) |
 
 #### 9.2.7 ChunkKind (Offset 0x2D, 1 byte)
 
@@ -642,7 +644,7 @@ The type of data in this chunk:
 
 #### 9.2.8 Reserved0 (Offset 0x2E, 2 bytes)
 
-Reserved. Must be `0`.
+Reserved. The low byte stores `ESnPakCompressionLevel`, high byte must be `0`.
 
 #### 9.2.9 SizeCompressed (Offset 0x30, 8 bytes)
 
@@ -863,6 +865,8 @@ Compression algorithm used for the main payload (same values as chunk header):
 - `0`: None
 - `1`: LZ4
 - `2`: Zstd
+- `3`: LZ4HC
+- `4`: ZstdFast
 
 #### 11.2.13 Flags (Offset 0x65, 1 byte)
 
@@ -875,7 +879,7 @@ Entry flags:
 
 #### 11.2.14 Reserved0 (Offset 0x66, 2 bytes)
 
-Reserved. Must be `0`.
+Reserved. The low byte stores `ESnPakCompressionLevel`, high byte must be `0`.
 
 #### 11.2.15 BulkFirstIndex (Offset 0x68, 4 bytes)
 
@@ -962,12 +966,14 @@ Compression algorithm:
 - `0`: None
 - `1`: LZ4
 - `2`: Zstd
+- `3`: LZ4HC
+- `4`: ZstdFast
 
 Bulk chunks can have different compression settings than the main payload. For example, already-compressed data (JPEG, OGG) might use `None`.
 
 #### 12.2.7 Reserved0 (Offset 0x21, 7 bytes)
 
-Reserved. Must be zeros.
+Reserved. `Reserved0[0]` stores `ESnPakCompressionLevel`, remaining bytes must be `0`.
 
 #### 12.2.8 HashHi / HashLo (Offset 0x28, 16 bytes)
 
@@ -1043,14 +1049,39 @@ Example: `550e8400-e29b-41d4-a716-446655440000`
 | **None** | `0` | No compression | Pre-compressed data (JPEG, OGG) |
 | **LZ4** | `1` | Fast compression/decompression | Real-time streaming |
 | **Zstd** | `2` | High compression ratio | Distribution, storage |
+| **LZ4HC** | `3` | Higher compression, slower | Size-sensitive payloads |
+| **ZstdFast** | `4` | Zstd fast mode (negative levels) | Many medium chunks |
+
+Compression levels (stored in `Reserved0` low byte):
+
+| Level | ID | Notes |
+|-------|----|-------|
+| **Default** | `0` | Library default level |
+| **Fast** | `1` | Favor speed |
+| **High** | `2` | Favor ratio (ignored by LZ4 fast) |
+| **Max** | `3` | Max ratio (ignored by LZ4 fast) |
 
 ### 14.2 LZ4 Compression
 
 **Library:** lz4 (https://github.com/lz4/lz4)
 
-**Compression:**
-- Standard mode: `LZ4HC_CLEVEL_DEFAULT` (level 9)
-- Maximum mode: `LZ4HC_CLEVEL_MAX` (level 12)
+**Compression (LZ4 fast):**
+- Default/High/Max: acceleration `1`
+- Fast: acceleration `8`
+
+```c
+int compressedSize = LZ4_compress_fast(
+    sourceData,
+    destBuffer,
+    sourceSize,
+    maxDestSize,
+    1  // or 8 for Fast
+);
+```
+
+**Compression (LZ4HC):**
+- Default: `LZ4HC_CLEVEL_DEFAULT` (level 9)
+- Max: `LZ4HC_CLEVEL_MAX` (level 12)
 
 ```c
 int compressedSize = LZ4_compress_HC(
@@ -1078,6 +1109,7 @@ int decompressedSize = LZ4_decompress_safe(
 
 **Compression:**
 - Standard mode: `ZSTD_defaultCLevel()` (typically level 3)
+- Fast mode: negative levels (e.g., `-3` default, `-5` fast)
 - Maximum mode: `ZSTD_maxCLevel()` (typically level 22)
 
 ```c
@@ -1086,7 +1118,7 @@ size_t compressedSize = ZSTD_compress(
     destCapacity,
     sourceData,
     sourceSize,
-    ZSTD_defaultCLevel()  // or ZSTD_maxCLevel()
+    ZSTD_defaultCLevel()  // or negative levels for ZstdFast
 );
 ```
 
@@ -1109,6 +1141,8 @@ size_t decompressedSize = ZSTD_decompress(
 | Audio (PCM) | Zstd | Good ratio for samples |
 | Pre-compressed (JPEG, BC7) | None | Already compressed |
 | Runtime-critical | LZ4 | Fastest decompression |
+| Size-sensitive | LZ4HC | Better ratio than LZ4 |
+| Many medium chunks | ZstdFast | Lower overhead per chunk |
 
 ### 14.5 Per-Chunk Compression
 
@@ -1433,6 +1467,8 @@ enum class ESnPakCompression : uint8_t {
     None = 0,
     LZ4 = 1,
     Zstd = 2,
+    LZ4HC = 3,
+    ZstdFast = 4,
 };
 
 struct SnPakHeaderV1 {
@@ -1545,7 +1581,8 @@ std::vector<uint8_t> Decompress(
 
     std::vector<uint8_t> result(uncompressedSize);
 
-    if (mode == ESnPakCompression::LZ4) {
+    if (mode == ESnPakCompression::LZ4 ||
+        mode == ESnPakCompression::LZ4HC) {
         int decompressedSize = LZ4_decompress_safe(
             reinterpret_cast<const char*>(data),
             reinterpret_cast<char*>(result.data()),
@@ -1557,7 +1594,8 @@ std::vector<uint8_t> Decompress(
             throw std::runtime_error("LZ4 decompression failed");
         }
     }
-    else if (mode == ESnPakCompression::Zstd) {
+    else if (mode == ESnPakCompression::Zstd ||
+             mode == ESnPakCompression::ZstdFast) {
         size_t decompressedSize = ZSTD_decompress(
             result.data(),
             result.size(),
@@ -1830,6 +1868,7 @@ int main() {
 
 #define XXH_INLINE_ALL
 #include <xxhash.h>
+#include <lz4.h>
 #include <lz4hc.h>
 #include <zstd.h>
 
@@ -1855,6 +1894,23 @@ std::vector<uint8_t> Compress(
         int maxSize = LZ4_compressBound(static_cast<int>(size));
         result.resize(maxSize);
 
+        int compressedSize = LZ4_compress_fast(
+            reinterpret_cast<const char*>(data),
+            reinterpret_cast<char*>(result.data()),
+            static_cast<int>(size),
+            maxSize,
+            1
+        );
+
+        if (compressedSize <= 0) {
+            throw std::runtime_error("LZ4 compression failed");
+        }
+        result.resize(compressedSize);
+    }
+    else if (mode == ESnPakCompression::LZ4HC) {
+        int maxSize = LZ4_compressBound(static_cast<int>(size));
+        result.resize(maxSize);
+
         int compressedSize = LZ4_compress_HC(
             reinterpret_cast<const char*>(data),
             reinterpret_cast<char*>(result.data()),
@@ -1864,20 +1920,24 @@ std::vector<uint8_t> Compress(
         );
 
         if (compressedSize <= 0) {
-            throw std::runtime_error("LZ4 compression failed");
+            throw std::runtime_error("LZ4HC compression failed");
         }
         result.resize(compressedSize);
     }
-    else if (mode == ESnPakCompression::Zstd) {
+    else if (mode == ESnPakCompression::Zstd ||
+             mode == ESnPakCompression::ZstdFast) {
         size_t maxSize = ZSTD_compressBound(size);
         result.resize(maxSize);
 
+        int level = (mode == ESnPakCompression::ZstdFast)
+            ? -3
+            : ZSTD_defaultCLevel();
         size_t compressedSize = ZSTD_compress(
             result.data(),
             result.size(),
             data,
             size,
-            ZSTD_defaultCLevel()
+            level
         );
 
         if (ZSTD_isError(compressedSize)) {
@@ -2346,6 +2406,8 @@ int main() {
 | 0 | None |
 | 1 | LZ4 |
 | 2 | Zstd |
+| 3 | LZ4HC |
+| 4 | ZstdFast |
 
 ### Bulk Semantics
 
