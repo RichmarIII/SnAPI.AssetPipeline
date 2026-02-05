@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -10,27 +11,10 @@
 #include "Uuid.h"
 #include "TypedPayload.h"
 #include "IAssetCooker.h"
+#include "PackCompression.h"
 
 namespace SnAPI::AssetPipeline
 {
-
-// Compression mode for writing packs
-enum class EPackCompression
-{
-    None,
-    LZ4,
-    LZ4HC,
-    Zstd,
-    ZstdFast,
-};
-
-enum class EPackCompressionLevel
-{
-    Default,
-    Fast,
-    High,
-    Max,
-};
 
 // Entry to add to an asset pack
 struct SNAPI_ASSETPIPELINE_API AssetPackEntry
@@ -42,6 +26,9 @@ struct SNAPI_ASSETPIPELINE_API AssetPackEntry
 
     TypedPayload Cooked;
     std::vector<BulkChunk> Bulk;
+
+    std::optional<EPackCompression> CompressionOverride;
+    std::optional<EPackCompressionLevel> CompressionLevelOverride;
 };
 
 class SNAPI_ASSETPIPELINE_API AssetPackWriter

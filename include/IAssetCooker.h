@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -9,6 +10,7 @@
 #include "Uuid.h"
 #include "TypedPayload.h"
 #include "IAssetImporter.h"
+#include "PackCompression.h"
 
 namespace SnAPI::AssetPipeline
 {
@@ -29,6 +31,8 @@ struct SNAPI_ASSETPIPELINE_API BulkChunk
     uint32_t SubIndex = 0;
     bool bCompress = true;
     std::vector<uint8_t> Bytes;
+    std::optional<EPackCompression> CompressionOverride;
+    std::optional<EPackCompressionLevel> CompressionLevelOverride;
 
     BulkChunk() = default;
     BulkChunk(EBulkSemantic InSemantic, uint32_t InSubIndex, bool InCompress = true)

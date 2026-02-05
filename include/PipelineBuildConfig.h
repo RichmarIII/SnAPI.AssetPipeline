@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "AssetPackWriter.h"
+#include "PackCompression.h"
 #include "Export.h"
 
 namespace SnAPI::AssetPipeline

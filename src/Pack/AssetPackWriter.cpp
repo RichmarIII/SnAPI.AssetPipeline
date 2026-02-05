@@ -22,8 +22,8 @@ namespace SnAPI::AssetPipeline
   struct AssetPackWriter::Impl
   {
       std::vector<AssetPackEntry> Assets;
-      Pack::ESnPakCompression Compression = Pack::ESnPakCompression::Zstd;
-      Pack::ESnPakCompressionLevel CompressionLevel = Pack::ESnPakCompressionLevel::Default;
+      Pack::ESnPakCompression Compression = Pack::ESnPakCompression::ZstdFast;
+      Pack::ESnPakCompressionLevel CompressionLevel = Pack::ESnPakCompressionLevel::Fast;
 
       static Pack::ESnPakCompression ToInternalCompression(const EPackCompression Mode)
       {
@@ -58,6 +58,27 @@ namespace SnAPI::AssetPipeline
           default:
             return Pack::ESnPakCompressionLevel::Default;
         }
+      }
+
+      static Pack::ESnPakCompression ResolveCompression(const std::optional<EPackCompression>& Override,
+                                                        const Pack::ESnPakCompression Fallback)
+      {
+        return Override ? ToInternalCompression(*Override) : Fallback;
+      }
+
+      static Pack::ESnPakCompressionLevel ResolveCompressionLevel(const std::optional<EPackCompressionLevel>& Override,
+                                                                  const Pack::ESnPakCompressionLevel Fallback,
+                                                                  const Pack::ESnPakCompression Compression)
+      {
+        if (Override)
+        {
+          return ToInternalCompressionLevel(*Override);
+        }
+        if (Compression == Pack::ESnPakCompression::None)
+        {
+          return Pack::ESnPakCompressionLevel::Default;
+        }
+        return Fallback;
       }
 
       std::vector<uint8_t> CompressData(const uint8_t* Data, size_t Size) const
@@ -286,7 +307,9 @@ namespace SnAPI::AssetPipeline
       }
 
       // Write main payload chunk
-      std::vector<uint8_t> CompressedPayload = m_Impl->CompressData(Asset.Cooked.Bytes.data(), Asset.Cooked.Bytes.size());
+      const auto AssetCompression = Impl::ResolveCompression(Asset.CompressionOverride, m_Impl->Compression);
+      const auto AssetLevel = Impl::ResolveCompressionLevel(Asset.CompressionLevelOverride, m_Impl->CompressionLevel, AssetCompression);
+      std::vector<uint8_t> CompressedPayload = Pack::Compress(Asset.Cooked.Bytes.data(), Asset.Cooked.Bytes.size(), AssetCompression, AssetLevel);
 
       Pack::SnPakChunkHeaderV1 ChunkHeader = {};
       std::memcpy(ChunkHeader.Magic, Pack::kChunkMagic, 4);
@@ -294,9 +317,9 @@ namespace SnAPI::AssetPipeline
       Pack::CopyUuid(ChunkHeader.AssetId, Asset.Id.Bytes);
       Pack::CopyUuid(ChunkHeader.PayloadType, Asset.Cooked.PayloadType.Bytes);
       ChunkHeader.SchemaVersion = Asset.Cooked.SchemaVersion;
-      ChunkHeader.Compression = static_cast<uint8_t>(m_Impl->Compression);
+      ChunkHeader.Compression = static_cast<uint8_t>(AssetCompression);
       ChunkHeader.ChunkKind = static_cast<uint8_t>(Pack::ESnPakChunkKind::MainPayload);
-      ChunkHeader.Reserved0 = static_cast<uint16_t>(m_Impl->CompressionLevel);
+      ChunkHeader.Reserved0 = static_cast<uint16_t>(AssetLevel);
       ChunkHeader.SizeCompressed = CompressedPayload.size();
       ChunkHeader.SizeUncompressed = Asset.Cooked.Bytes.size();
 
@@ -307,8 +330,8 @@ namespace SnAPI::AssetPipeline
       Entry.PayloadChunkOffset = CurrentOffset;
       Entry.PayloadChunkSizeCompressed = sizeof(ChunkHeader) + CompressedPayload.size();
       Entry.PayloadChunkSizeUncompressed = Asset.Cooked.Bytes.size();
-      Entry.Compression = static_cast<uint8_t>(m_Impl->Compression);
-      Entry.Reserved0 = static_cast<uint16_t>(m_Impl->CompressionLevel);
+      Entry.Compression = static_cast<uint8_t>(AssetCompression);
+      Entry.Reserved0 = static_cast<uint16_t>(AssetLevel);
       Entry.PayloadHashHi = PayloadHash.high64;
       Entry.PayloadHashLo = PayloadHash.low64;
 
@@ -326,8 +349,10 @@ namespace SnAPI::AssetPipeline
         for (uint32_t BulkIdx = 0; BulkIdx < Asset.Bulk.size(); ++BulkIdx)
         {
           auto& Bulk = Asset.Bulk[BulkIdx];
-          Pack::ESnPakCompression BulkCompression = Bulk.bCompress ? m_Impl->Compression : Pack::ESnPakCompression::None;
-          Pack::ESnPakCompressionLevel BulkLevel = Bulk.bCompress ? m_Impl->CompressionLevel : Pack::ESnPakCompressionLevel::Default;
+          Pack::ESnPakCompression BulkCompression = Bulk.CompressionOverride
+                                                      ? Impl::ToInternalCompression(*Bulk.CompressionOverride)
+                                                      : (Bulk.bCompress ? m_Impl->Compression : Pack::ESnPakCompression::None);
+          Pack::ESnPakCompressionLevel BulkLevel = Impl::ResolveCompressionLevel(Bulk.CompressionLevelOverride, m_Impl->CompressionLevel, BulkCompression);
           std::vector<uint8_t> CompressedBulk = Pack::Compress(Bulk.Bytes.data(), Bulk.Bytes.size(), BulkCompression, BulkLevel);
 
           Pack::SnPakChunkHeaderV1 BulkChunkHeader = {};
@@ -540,7 +565,9 @@ namespace SnAPI::AssetPipeline
       }
 
       // Write main payload
-      std::vector<uint8_t> CompressedPayload = m_Impl->CompressData(Asset.Cooked.Bytes.data(), Asset.Cooked.Bytes.size());
+      const auto AssetCompression = Impl::ResolveCompression(Asset.CompressionOverride, m_Impl->Compression);
+      const auto AssetLevel = Impl::ResolveCompressionLevel(Asset.CompressionLevelOverride, m_Impl->CompressionLevel, AssetCompression);
+      std::vector<uint8_t> CompressedPayload = Pack::Compress(Asset.Cooked.Bytes.data(), Asset.Cooked.Bytes.size(), AssetCompression, AssetLevel);
 
       Pack::SnPakChunkHeaderV1 ChunkHeader = {};
       std::memcpy(ChunkHeader.Magic, Pack::kChunkMagic, 4);
@@ -548,9 +575,9 @@ namespace SnAPI::AssetPipeline
       Pack::CopyUuid(ChunkHeader.AssetId, Asset.Id.Bytes);
       Pack::CopyUuid(ChunkHeader.PayloadType, Asset.Cooked.PayloadType.Bytes);
       ChunkHeader.SchemaVersion = Asset.Cooked.SchemaVersion;
-      ChunkHeader.Compression = static_cast<uint8_t>(m_Impl->Compression);
+      ChunkHeader.Compression = static_cast<uint8_t>(AssetCompression);
       ChunkHeader.ChunkKind = static_cast<uint8_t>(Pack::ESnPakChunkKind::MainPayload);
-      ChunkHeader.Reserved0 = static_cast<uint16_t>(m_Impl->CompressionLevel);
+      ChunkHeader.Reserved0 = static_cast<uint16_t>(AssetLevel);
       ChunkHeader.SizeCompressed = CompressedPayload.size();
       ChunkHeader.SizeUncompressed = Asset.Cooked.Bytes.size();
 
@@ -561,8 +588,8 @@ namespace SnAPI::AssetPipeline
       Entry.PayloadChunkOffset = CurrentOffset;
       Entry.PayloadChunkSizeCompressed = sizeof(ChunkHeader) + CompressedPayload.size();
       Entry.PayloadChunkSizeUncompressed = Asset.Cooked.Bytes.size();
-      Entry.Compression = static_cast<uint8_t>(m_Impl->Compression);
-      Entry.Reserved0 = static_cast<uint16_t>(m_Impl->CompressionLevel);
+      Entry.Compression = static_cast<uint8_t>(AssetCompression);
+      Entry.Reserved0 = static_cast<uint16_t>(AssetLevel);
       Entry.PayloadHashHi = PayloadHash.high64;
       Entry.PayloadHashLo = PayloadHash.low64;
 
@@ -580,8 +607,10 @@ namespace SnAPI::AssetPipeline
         for (uint32_t BulkIdx = 0; BulkIdx < Asset.Bulk.size(); ++BulkIdx)
         {
           auto& Bulk = Asset.Bulk[BulkIdx];
-          Pack::ESnPakCompression BulkCompression = Bulk.bCompress ? m_Impl->Compression : Pack::ESnPakCompression::None;
-          Pack::ESnPakCompressionLevel BulkLevel = Bulk.bCompress ? m_Impl->CompressionLevel : Pack::ESnPakCompressionLevel::Default;
+          Pack::ESnPakCompression BulkCompression = Bulk.CompressionOverride
+                                                      ? Impl::ToInternalCompression(*Bulk.CompressionOverride)
+                                                      : (Bulk.bCompress ? m_Impl->Compression : Pack::ESnPakCompression::None);
+          Pack::ESnPakCompressionLevel BulkLevel = Impl::ResolveCompressionLevel(Bulk.CompressionLevelOverride, m_Impl->CompressionLevel, BulkCompression);
           std::vector<uint8_t> CompressedBulk = Pack::Compress(Bulk.Bytes.data(), Bulk.Bytes.size(), BulkCompression, BulkLevel);
 
           Pack::SnPakChunkHeaderV1 BulkChunkHeader = {};
