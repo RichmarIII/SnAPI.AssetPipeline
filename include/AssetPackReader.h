@@ -25,6 +25,18 @@ struct SNAPI_ASSETPIPELINE_API AssetInfo
     uint32_t BulkChunkCount;
 };
 
+struct SNAPI_ASSETPIPELINE_API AssetPackReadOptions
+{
+    bool bVerifyStringTableHash{false};
+    bool bVerifyIndexEntriesHash{false};
+    bool bVerifyIndexBlockHash{false};
+    bool bVerifyChunkHash {false};
+    bool bValidateChunkBounds {false};
+    bool bValidateChunkSizes {false};
+    bool bValidateChunkSanity {false};
+    bool bValidateChunkIdentity {false};
+};
+
 class SNAPI_ASSETPIPELINE_API AssetPackReader
 {
 public:
@@ -33,6 +45,7 @@ public:
 
     // Open a .snpak file for reading
     std::expected<void, std::string> Open(const std::string& Path);
+    std::expected<void, std::string> Open(const std::string& Path, const AssetPackReadOptions& Options);
 
     // Close the pack
     void Close();

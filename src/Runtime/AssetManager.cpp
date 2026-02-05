@@ -172,7 +172,7 @@ namespace SnAPI::AssetPipeline
     }
 
     auto Reader = std::make_unique<AssetPackReader>();
-    auto Result = Reader->Open(Path);
+    auto Result = Reader->Open(Path, Options.ReadOptions);
     if (!Result.has_value())
     {
       return std::unexpected(Result.error());
@@ -649,6 +649,7 @@ namespace SnAPI::AssetPipeline
 
     // Build AssetInfo for the context
     AssetInfo Info;
+    Info.Id = Asset.Id;
     Info.Id = Asset.Id;
     Info.AssetKind = Asset.AssetKind;
     Info.CookedPayloadType = Asset.Cooked.PayloadType;

@@ -115,6 +115,7 @@ struct SNAPI_ASSETPIPELINE_API PackMountOptions
     int32_t Priority = 0;           // Higher priority packs override lower (for overlays/patches)
     bool bLoadToMemory = false;     // Load entire pack to memory (for small packs)
     std::string MountPoint = "";    // Virtual path prefix (e.g., "/dlc1/")
+    AssetPackReadOptions ReadOptions;
 };
 
 // Asset manager configuration

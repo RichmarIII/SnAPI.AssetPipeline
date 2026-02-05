@@ -1,4 +1,5 @@
 #include "AssetPackReader.h"
+#include "MemoryMappedFile.h"
 #include "SnPakFormat.h"
 
 #define XXH_INLINE_ALL
@@ -22,6 +23,8 @@ namespace SnAPI::AssetPipeline
   {
       std::string FilePath;
       mutable std::ifstream File; // Used only during Open() for initialization
+      StreamingBulkReader MappedReader;
+      AssetPackReadOptions Options;
 
       Pack::SnPakHeaderV1 Header;
       std::vector<std::string> StringTable;
@@ -38,7 +41,7 @@ namespace SnAPI::AssetPipeline
 
       // Maximum sane limits for allocations (protect against corrupted files)
       static constexpr size_t kMaxStringCount = 10'000'000;     // 10 million strings
-      static constexpr size_t kMaxBlockSize = 1'000'000'000;    // 1 GB
+      static constexpr size_t kMaxBlockSize = 8ull * 1024ull * 1024ull * 1024ull;    // 8 GiB
       static constexpr size_t kMaxEntryCount = 10'000'000;      // 10 million assets
       static constexpr size_t kMaxBulkEntryCount = 100'000'000; // 100 million bulk entries
 
@@ -164,11 +167,14 @@ namespace SnAPI::AssetPipeline
           }
         }
 
-        // Verify hash of string data
-        XXH128_hash_t Hash = XXH3_128bits(StringData.data(), StringData.size());
-        if (Hash.high64 != StrHeader.HashHi || Hash.low64 != StrHeader.HashLo)
+        if (Options.bVerifyStringTableHash)
         {
-          return std::unexpected("String table hash mismatch - data corrupted");
+          // Verify hash of string data
+          XXH128_hash_t Hash = XXH3_128bits(StringData.data(), StringData.size());
+          if (Hash.high64 != StrHeader.HashHi || Hash.low64 != StrHeader.HashLo)
+          {
+            return std::unexpected("String table hash mismatch - data corrupted");
+          }
         }
 
         // FIX #5: Safe string parsing with offset bounds and null terminator checks
@@ -290,36 +296,40 @@ namespace SnAPI::AssetPipeline
           }
         }
 
-        // FIX #8: Use streaming xxhash API to avoid large copy buffer
-        XXH3_state_t* State = XXH3_createState();
-        if (State == nullptr)
+        if (Options.bVerifyIndexEntriesHash)
         {
-          return std::unexpected("Failed to create hash state");
+          // FIX #8: Use streaming xxhash API to avoid large copy buffer
+          XXH3_state_t* State = XXH3_createState();
+          if (State == nullptr)
+          {
+            return std::unexpected("Failed to create hash state");
+          }
+
+          XXH3_128bits_reset(State);
+
+          if (!IndexEntries.empty())
+          {
+            XXH3_128bits_update(State, IndexEntries.data(), EntriesSize);
+          }
+          if (!BulkEntries.empty())
+          {
+            XXH3_128bits_update(State, BulkEntries.data(), BulkEntriesSize);
+          }
+
+          XXH128_hash_t Hash = XXH3_128bits_digest(State);
+          XXH3_freeState(State);
+
+          if (Hash.high64 != IdxHeader.EntriesHashHi || Hash.low64 != IdxHeader.EntriesHashLo)
+          {
+            return std::unexpected("Index entries hash mismatch - data corrupted");
+          }
         }
 
-        XXH3_128bits_reset(State);
-
-        if (!IndexEntries.empty())
+        if (Options.bVerifyIndexBlockHash)
         {
-          XXH3_128bits_update(State, IndexEntries.data(), EntriesSize);
-        }
-        if (!BulkEntries.empty())
-        {
-          XXH3_128bits_update(State, BulkEntries.data(), BulkEntriesSize);
-        }
-
-        XXH128_hash_t Hash = XXH3_128bits_digest(State);
-        XXH3_freeState(State);
-
-        if (Hash.high64 != IdxHeader.EntriesHashHi || Hash.low64 != IdxHeader.EntriesHashLo)
-        {
-          return std::unexpected("Index entries hash mismatch - data corrupted");
-        }
-
-        // FIX #4: Verify the header's IndexHash against the entire index block
-        // The header stores a hash of the complete index block (header + entries + bulk entries)
-        // This provides an additional integrity check at a different level than EntriesHash
-        {
+          // FIX #4: Verify the header's IndexHash against the entire index block
+          // The header stores a hash of the complete index block (header + entries + bulk entries)
+          // This provides an additional integrity check at a different level than EntriesHash
           XXH3_state_t* BlockState = XXH3_createState();
           if (BlockState == nullptr)
           {
@@ -375,50 +385,36 @@ namespace SnAPI::AssetPipeline
                                                                  const Pack::SnPakBulkEntryV1* ExpectedBulkEntry = nullptr,
                                                                  const uint8_t* ExpectedBulkAssetId = nullptr) const
       {
-        // FIX #4: Open a dedicated stream for this chunk load
-        // This enables true parallel reads from multiple threads without mutex contention
-        std::ifstream ChunkFile(FilePath, std::ios::binary);
-        if (!ChunkFile.is_open())
+        if (!MappedReader.IsOpen())
         {
-          return std::unexpected("Failed to open file for chunk read: " + FilePath);
+          return std::unexpected("Pack file is not memory-mapped");
         }
 
-        // Helper lambdas for local stream operations
-        auto LocalReadExact = [&ChunkFile](void* Dst, size_t Bytes) -> bool {
-          ChunkFile.read(reinterpret_cast<char*>(Dst), static_cast<std::streamsize>(Bytes));
-          return ChunkFile.good() && static_cast<size_t>(ChunkFile.gcount()) == Bytes;
-        };
-
-        auto LocalSeekAndRead = [&, this](uint64_t Off, void* Dst, size_t Bytes) -> bool {
-          if (!CheckRange(Off, Bytes))
-          {
-            return false;
-          }
-          ChunkFile.seekg(static_cast<std::streamoff>(Off), std::ios::beg);
-          if (!ChunkFile.good())
-          {
-            return false;
-          }
-          return LocalReadExact(Dst, Bytes);
-        };
-
         // FIX #3: Validate chunk location against file bounds using INDEX size
-        if (!CheckRange(Offset, ExpectedTotalSize))
+        if (Options.bValidateChunkBounds)
         {
-          return std::unexpected("Chunk offset/size exceeds file bounds");
+          if (!CheckRange(Offset, ExpectedTotalSize))
+          {
+            return std::unexpected("Chunk offset/size exceeds file bounds");
+          }
         }
 
         // Ensure minimum size for chunk header
-        if (ExpectedTotalSize < sizeof(Pack::SnPakChunkHeaderV1))
+        if (Options.bValidateChunkSizes)
         {
-          return std::unexpected("Chunk total size too small for header");
+          if (ExpectedTotalSize < sizeof(Pack::SnPakChunkHeaderV1))
+          {
+            return std::unexpected("Chunk total size too small for header");
+          }
         }
 
         Pack::SnPakChunkHeaderV1 ChunkHeader;
-        if (!LocalSeekAndRead(Offset, &ChunkHeader, sizeof(ChunkHeader)))
+        auto HeaderSpanResult = MappedReader.ReadChunk(Offset, sizeof(ChunkHeader));
+        if (!HeaderSpanResult.has_value())
         {
-          return std::unexpected("Failed to read chunk header");
+          return std::unexpected("Failed to read chunk header: " + HeaderSpanResult.error());
         }
+        std::memcpy(&ChunkHeader, HeaderSpanResult->data(), sizeof(ChunkHeader));
 
         // Validate magic
         if (std::memcmp(ChunkHeader.Magic, Pack::kChunkMagic, 4) != 0)
@@ -433,29 +429,38 @@ namespace SnAPI::AssetPipeline
         }
 
         // FIX #3: Verify chunk header sizes match index expectations
-        if (ChunkHeader.SizeUncompressed != ExpectedUncompressedSize)
+        if (Options.bValidateChunkSizes)
         {
-          return std::unexpected("Chunk uncompressed size mismatch with index");
+          if (ChunkHeader.SizeUncompressed != ExpectedUncompressedSize)
+          {
+            return std::unexpected("Chunk uncompressed size mismatch with index");
+          }
         }
 
         uint64_t ExpectedCompressedDataSize = ExpectedTotalSize - sizeof(Pack::SnPakChunkHeaderV1);
-        if (ChunkHeader.SizeCompressed != ExpectedCompressedDataSize)
+        if (Options.bValidateChunkSizes)
         {
-          return std::unexpected("Chunk compressed size mismatch with index");
+          if (ChunkHeader.SizeCompressed != ExpectedCompressedDataSize)
+          {
+            return std::unexpected("Chunk compressed size mismatch with index");
+          }
         }
 
         // Sanity check sizes
-        if (ChunkHeader.SizeCompressed > kMaxBlockSize)
+        if (Options.bValidateChunkSanity)
         {
-          return std::unexpected("Chunk compressed size exceeds sanity limit");
-        }
-        if (ChunkHeader.SizeUncompressed > kMaxBlockSize)
-        {
-          return std::unexpected("Chunk uncompressed size exceeds sanity limit");
+          if (ChunkHeader.SizeCompressed > kMaxBlockSize)
+          {
+            return std::unexpected("Chunk compressed size exceeds sanity limit");
+          }
+          if (ChunkHeader.SizeUncompressed > kMaxBlockSize)
+          {
+            return std::unexpected("Chunk uncompressed size exceeds sanity limit");
+          }
         }
 
         // FIX #4: Validate chunk identity for main payloads
-        if (ExpectedEntry != nullptr)
+        if (ExpectedEntry != nullptr && Options.bValidateChunkIdentity)
         {
           // Must be MainPayload kind
           if (ChunkHeader.ChunkKind != static_cast<uint8_t>(Pack::ESnPakChunkKind::MainPayload))
@@ -489,7 +494,7 @@ namespace SnAPI::AssetPipeline
         }
 
         // FIX #4 & #6: Validate chunk identity for bulk data
-        if (ExpectedBulkEntry != nullptr)
+        if (ExpectedBulkEntry != nullptr && Options.bValidateChunkIdentity)
         {
           // Must be Bulk kind
           if (ChunkHeader.ChunkKind != static_cast<uint8_t>(Pack::ESnPakChunkKind::Bulk))
@@ -513,51 +518,62 @@ namespace SnAPI::AssetPipeline
         // Decompress (or read directly for uncompressed data)
         auto Mode = static_cast<Pack::ESnPakCompression>(ChunkHeader.Compression);
         std::vector<uint8_t> Output;
+        const uint64_t DataOffset = Offset + sizeof(Pack::SnPakChunkHeaderV1);
 
         if (Mode == Pack::ESnPakCompression::None)
         {
           // FIX #3: For uncompressed data, read directly into output buffer
           // This avoids allocating a separate CompressedData buffer
-          if (ChunkHeader.SizeCompressed != ChunkHeader.SizeUncompressed)
+          if (Options.bValidateChunkSizes)
           {
-            return std::unexpected("Uncompressed chunk has mismatched sizes");
+            if (ChunkHeader.SizeCompressed != ChunkHeader.SizeUncompressed)
+            {
+              return std::unexpected("Uncompressed chunk has mismatched sizes");
+            }
           }
-          Output.resize(ChunkHeader.SizeUncompressed);
           if (ChunkHeader.SizeUncompressed > 0)
           {
-            if (!LocalReadExact(Output.data(), Output.size()))
+            auto DataSpanResult = MappedReader.ReadChunk(DataOffset, static_cast<size_t>(ChunkHeader.SizeUncompressed));
+            if (!DataSpanResult.has_value())
             {
-              return std::unexpected("Failed to read chunk data");
+              return std::unexpected("Failed to read chunk data: " + DataSpanResult.error());
             }
+            Output.assign(DataSpanResult->begin(), DataSpanResult->end());
           }
         }
         else
         {
-          // Read compressed data, then decompress
-          std::vector<uint8_t> CompressedData(ChunkHeader.SizeCompressed);
           if (ChunkHeader.SizeCompressed > 0)
           {
-            if (!LocalReadExact(CompressedData.data(), CompressedData.size()))
+            auto DataSpanResult = MappedReader.ReadChunk(DataOffset, static_cast<size_t>(ChunkHeader.SizeCompressed));
+            if (!DataSpanResult.has_value())
             {
-              return std::unexpected("Failed to read chunk compressed data");
+              return std::unexpected("Failed to read chunk compressed data: " + DataSpanResult.error());
+            }
+
+            try
+            {
+              Output = Pack::Decompress(DataSpanResult->data(), DataSpanResult->size(), ChunkHeader.SizeUncompressed, Mode);
+            }
+            catch (const std::exception& E)
+            {
+              return std::unexpected(std::string("Decompression failed: ") + E.what());
             }
           }
-
-          try
+          else
           {
-            Output = Pack::Decompress(CompressedData.data(), CompressedData.size(), ChunkHeader.SizeUncompressed, Mode);
-          }
-          catch (const std::exception& E)
-          {
-            return std::unexpected(std::string("Decompression failed: ") + E.what());
+            Output.clear();
           }
         }
 
-        // Verify hash of decompressed/output data
-        XXH128_hash_t Hash = XXH3_128bits(Output.data(), Output.size());
-        if (Hash.high64 != ChunkHeader.HashHi || Hash.low64 != ChunkHeader.HashLo)
+        if (Options.bVerifyChunkHash)
         {
-          return std::unexpected("Chunk hash mismatch - data corrupted");
+          // Verify hash of decompressed/output data
+          XXH128_hash_t Hash = XXH3_128bits(Output.data(), Output.size());
+          if (Hash.high64 != ChunkHeader.HashHi || Hash.low64 != ChunkHeader.HashLo)
+          {
+            return std::unexpected("Chunk hash mismatch - data corrupted");
+          }
         }
 
         return Output;
@@ -573,6 +589,13 @@ namespace SnAPI::AssetPipeline
 
   std::expected<void, std::string> AssetPackReader::Open(const std::string& Path)
   {
+    AssetPackReadOptions DefaultOptions;
+    return Open(Path, DefaultOptions);
+  }
+
+  std::expected<void, std::string> AssetPackReader::Open(const std::string& Path, const AssetPackReadOptions& Options)
+  {
+    m_Impl->Options = Options;
     m_Impl->FilePath = Path;
     m_Impl->File.open(Path, std::ios::binary);
 
@@ -656,6 +679,12 @@ namespace SnAPI::AssetPipeline
       return std::unexpected("Failed to read index: " + IdxResult.error());
     }
 
+    auto MapResult = m_Impl->MappedReader.Open(Path);
+    if (!MapResult.has_value())
+    {
+      return std::unexpected("Failed to memory-map pack: " + MapResult.error());
+    }
+
     m_Impl->bOpen = true;
     return {};
   }
@@ -666,6 +695,7 @@ namespace SnAPI::AssetPipeline
     {
       m_Impl->File.close();
     }
+    m_Impl->MappedReader.Close();
     m_Impl->bOpen = false;
     m_Impl->ValidatedFileSize = 0;
     m_Impl->StringTable.clear();
