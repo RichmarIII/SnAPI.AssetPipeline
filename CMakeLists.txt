@@ -35,7 +35,7 @@ set(SNAPI_SOURCES
 )
 
 # Main library
-add_library(SnAPI.AssetPipeline SHARED ${SNAPI_SOURCES})
+add_library(SnAPI.AssetPipeline ${SNAPI_SOURCES})
 
 target_include_directories(SnAPI.AssetPipeline
     PUBLIC
@@ -94,12 +94,41 @@ endif()
 # Installation
 include(GNUInstallDirs)
 
+set(SNAPI_ASSETPIPELINE_EXPORT_DEPS
+    stduuid
+    xxhash
+    lz4
+    libzstd_static
+    cereal
+    sqlite3
+)
+
+function(snapi_assetpipeline_install_dependency TargetName)
+    if (NOT TARGET ${TargetName})
+        return()
+    endif()
+    get_target_property(TargetType ${TargetName} TYPE)
+    if (TargetType STREQUAL "INTERFACE_LIBRARY")
+        install(TARGETS ${TargetName} EXPORT SnAPI.AssetPipelineTargets)
+    else()
+        install(TARGETS ${TargetName} EXPORT SnAPI.AssetPipelineTargets
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+    endif()
+endfunction()
+
 install(TARGETS SnAPI.AssetPipeline
     EXPORT SnAPI.AssetPipelineTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+foreach(Dep IN LISTS SNAPI_ASSETPIPELINE_EXPORT_DEPS)
+    snapi_assetpipeline_install_dependency(${Dep})
+endforeach()
 
 install(DIRECTORY include/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}

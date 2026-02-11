@@ -1,4 +1,5 @@
 include(FetchContent)
+include(GNUInstallDirs)
 
 # stduuid - UUID parsing/generation (MIT)
 FetchContent_Declare(
@@ -88,7 +89,13 @@ if(NOT xxhash_POPULATED)
     FetchContent_Populate(xxhash)
 endif()
 add_library(xxhash INTERFACE)
-target_include_directories(xxhash INTERFACE ${xxhash_SOURCE_DIR})
+target_include_directories(xxhash INTERFACE
+    $<BUILD_INTERFACE:${xxhash_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+install(FILES ${xxhash_SOURCE_DIR}/xxhash.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
 
 # LZ4
 FetchContent_GetProperties(lz4)
@@ -101,8 +108,15 @@ add_library(lz4 STATIC
     ${lz4_SOURCE_DIR}/lib/lz4frame.c
     ${lz4_SOURCE_DIR}/lib/xxhash.c
 )
-target_include_directories(lz4 PUBLIC ${lz4_SOURCE_DIR}/lib)
+target_include_directories(lz4 PUBLIC
+    $<BUILD_INTERFACE:${lz4_SOURCE_DIR}/lib>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
 set_target_properties(lz4 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+install(DIRECTORY ${lz4_SOURCE_DIR}/lib/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "lz4*.h"
+)
 
 # Zstd - build manually to avoid CMake version issues
 FetchContent_GetProperties(zstd)
@@ -120,9 +134,16 @@ add_library(libzstd_static STATIC
     ${ZSTD_COMPRESS_SOURCES}
     ${ZSTD_DECOMPRESS_SOURCES}
 )
-target_include_directories(libzstd_static PUBLIC ${zstd_SOURCE_DIR}/lib)
+target_include_directories(libzstd_static PUBLIC
+    $<BUILD_INTERFACE:${zstd_SOURCE_DIR}/lib>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
 target_compile_definitions(libzstd_static PRIVATE ZSTD_MULTITHREAD ZSTD_DISABLE_ASM)
 set_target_properties(libzstd_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+install(DIRECTORY ${zstd_SOURCE_DIR}/lib/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "zstd*.h"
+)
 
 # cereal - header only
 FetchContent_GetProperties(cereal)
@@ -130,7 +151,13 @@ if(NOT cereal_POPULATED)
     FetchContent_Populate(cereal)
 endif()
 add_library(cereal INTERFACE)
-target_include_directories(cereal INTERFACE ${cereal_SOURCE_DIR}/include)
+target_include_directories(cereal INTERFACE
+    $<BUILD_INTERFACE:${cereal_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+install(DIRECTORY ${cereal_SOURCE_DIR}/include/cereal
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
 
 # SQLite3
 FetchContent_GetProperties(sqlite3)
@@ -138,11 +165,19 @@ if(NOT sqlite3_POPULATED)
     FetchContent_Populate(sqlite3)
 endif()
 add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
-target_include_directories(sqlite3 PUBLIC ${sqlite3_SOURCE_DIR})
+target_include_directories(sqlite3 PUBLIC
+    $<BUILD_INTERFACE:${sqlite3_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
 set_target_properties(sqlite3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(UNIX AND NOT APPLE)
     target_link_libraries(sqlite3 PUBLIC dl pthread)
 endif()
+install(FILES
+    ${sqlite3_SOURCE_DIR}/sqlite3.h
+    ${sqlite3_SOURCE_DIR}/sqlite3ext.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
 
 # FreeImage - complex build, use system or build manually
 FetchContent_GetProperties(freeimage)
