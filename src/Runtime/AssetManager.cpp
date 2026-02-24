@@ -1,4 +1,5 @@
 #include "AssetManager.h"
+#include "AssetPackWriter.h"
 #include "AssetPipeline.h"
 #include "Runtime/SourceAssetResolver.h"
 #include "Runtime/AutoMountScanner.h"
@@ -6,11 +7,40 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace SnAPI::AssetPipeline
 {
+  namespace
+  {
+    [[nodiscard]] AssetInfo ToAssetInfo(const CookedAsset& Asset)
+    {
+      AssetInfo Info{};
+      Info.Id = Asset.Id;
+      Info.AssetKind = Asset.AssetKind;
+      Info.CookedPayloadType = Asset.Cooked.PayloadType;
+      Info.SchemaVersion = Asset.Cooked.SchemaVersion;
+      Info.Name = Asset.LogicalName;
+      Info.VariantKey.clear();
+      Info.BulkChunkCount = static_cast<uint32_t>(Asset.Bulk.size());
+      return Info;
+    }
+
+    [[nodiscard]] AssetPackEntry ToPackEntry(const CookedAsset& Asset)
+    {
+      AssetPackEntry Entry{};
+      Entry.Id = Asset.Id;
+      Entry.AssetKind = Asset.AssetKind;
+      Entry.Name = Asset.LogicalName;
+      Entry.Cooked = Asset.Cooked;
+      Entry.Bulk = Asset.Bulk;
+      return Entry;
+    }
+  } // namespace
+
 
   struct MountedPack
   {
@@ -48,6 +78,11 @@ namespace SnAPI::AssetPipeline
 
       // Unified pipeline engine (owns PayloadRegistry)
       std::unique_ptr<AssetPipelineEngine> Engine;
+
+      // Runtime memory assets (editor-authored/transient assets).
+      mutable std::mutex RuntimeAssetsMutex{};
+      std::unordered_map<AssetId, CookedAsset, UuidHash> RuntimeAssetsById{};
+      std::unordered_map<std::string, AssetId> RuntimeAssetNameToId{};
 
       // Parent pointer for async loader
       AssetManager* Parent = nullptr;
@@ -98,6 +133,35 @@ namespace SnAPI::AssetPipeline
           }
         }
         return {nullptr, {}, nullptr};
+      }
+
+      bool TryFindRuntimeAssetById(const AssetId Id, CookedAsset& OutAsset) const
+      {
+        std::lock_guard Lock(RuntimeAssetsMutex);
+        const auto It = RuntimeAssetsById.find(Id);
+        if (It == RuntimeAssetsById.end())
+        {
+          return false;
+        }
+        OutAsset = It->second;
+        return true;
+      }
+
+      bool TryFindRuntimeAssetByName(const std::string& Name, CookedAsset& OutAsset) const
+      {
+        std::lock_guard Lock(RuntimeAssetsMutex);
+        const auto NameIt = RuntimeAssetNameToId.find(Name);
+        if (NameIt == RuntimeAssetNameToId.end())
+        {
+          return false;
+        }
+        const auto AssetIt = RuntimeAssetsById.find(NameIt->second);
+        if (AssetIt == RuntimeAssetsById.end())
+        {
+          return false;
+        }
+        OutAsset = AssetIt->second;
+        return true;
       }
   };
 
@@ -246,6 +310,12 @@ namespace SnAPI::AssetPipeline
 
   std::expected<AssetInfo, std::string> AssetManager::FindAsset(const std::string& Name) const
   {
+    CookedAsset RuntimeAsset{};
+    if (m_Impl->TryFindRuntimeAssetByName(Name, RuntimeAsset))
+    {
+      return ToAssetInfo(RuntimeAsset);
+    }
+
     auto [Reader, Info, Pack] = m_Impl->FindPackForAssetByName(Name);
     if (!Reader)
     {
@@ -256,6 +326,12 @@ namespace SnAPI::AssetPipeline
 
   std::expected<AssetInfo, std::string> AssetManager::FindAsset(AssetId Id) const
   {
+    CookedAsset RuntimeAsset{};
+    if (m_Impl->TryFindRuntimeAssetById(Id, RuntimeAsset))
+    {
+      return ToAssetInfo(RuntimeAsset);
+    }
+
     auto [Reader, Pack] = m_Impl->FindPackForAsset(Id);
     if (!Reader)
     {
@@ -267,6 +343,12 @@ namespace SnAPI::AssetPipeline
   std::vector<AssetInfo> AssetManager::FindAssetVariants(const std::string& Name) const
   {
     std::vector<AssetInfo> AllVariants;
+
+    CookedAsset RuntimeAsset{};
+    if (m_Impl->TryFindRuntimeAssetByName(Name, RuntimeAsset))
+    {
+      AllVariants.push_back(ToAssetInfo(RuntimeAsset));
+    }
 
     for (const auto& Pack : m_Impl->Packs)
     {
@@ -284,7 +366,14 @@ namespace SnAPI::AssetPipeline
       }
 
       auto Variants = Pack.Reader->FindAssetsByName(LookupName);
-      AllVariants.insert(AllVariants.end(), Variants.begin(), Variants.end());
+      for (const auto& Variant : Variants)
+      {
+        if (std::find_if(AllVariants.begin(), AllVariants.end(), [&Variant](const AssetInfo& Existing) { return Existing.Id == Variant.Id; }) ==
+            AllVariants.end())
+        {
+          AllVariants.push_back(Variant);
+        }
+      }
     }
 
     return AllVariants;
@@ -293,14 +382,26 @@ namespace SnAPI::AssetPipeline
   std::vector<AssetInfo> AssetManager::ListAssets() const
   {
     std::vector<AssetInfo> AllAssets;
+    std::unordered_set<AssetId, UuidHash> SeenIds;
+
+    {
+      std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+      AllAssets.reserve(m_Impl->RuntimeAssetsById.size());
+      for (const auto& [Id, Asset] : m_Impl->RuntimeAssetsById)
+      {
+        SeenIds.insert(Id);
+        AllAssets.push_back(ToAssetInfo(Asset));
+      }
+    }
 
     for (const auto& Pack : m_Impl->Packs)
     {
       for (uint32_t I = 0; I < Pack.Reader->GetAssetCount(); ++I)
       {
         auto Info = Pack.Reader->GetAssetInfo(I);
-        if (Info.has_value())
+        if (Info.has_value() && !SeenIds.contains(Info->Id))
         {
+          SeenIds.insert(Info->Id);
           AllAssets.push_back(*Info);
         }
       }
@@ -309,8 +410,126 @@ namespace SnAPI::AssetPipeline
     return AllAssets;
   }
 
+  std::vector<AssetCatalogEntry> AssetManager::ListAssetCatalog() const
+  {
+    std::vector<AssetCatalogEntry> Entries;
+    std::unordered_set<AssetId, UuidHash> SeenIds;
+
+    {
+      std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+      Entries.reserve(m_Impl->RuntimeAssetsById.size() + m_Impl->Packs.size() * 8u);
+      for (const auto& [Id, Asset] : m_Impl->RuntimeAssetsById)
+      {
+        SeenIds.insert(Id);
+        AssetCatalogEntry Entry{};
+        Entry.Info = ToAssetInfo(Asset);
+        Entry.Origin = EAssetOrigin::RuntimeMemory;
+        Entry.Dirty = Asset.bDirty;
+        Entry.CanSave = true;
+        Entries.push_back(std::move(Entry));
+      }
+    }
+
+    for (const auto& Pack : m_Impl->Packs)
+    {
+      for (uint32_t I = 0; I < Pack.Reader->GetAssetCount(); ++I)
+      {
+        auto Info = Pack.Reader->GetAssetInfo(I);
+        if (!Info.has_value() || SeenIds.contains(Info->Id))
+        {
+          continue;
+        }
+
+        SeenIds.insert(Info->Id);
+        AssetCatalogEntry Entry{};
+        Entry.Info = *Info;
+        Entry.Origin = EAssetOrigin::Pack;
+        Entry.Dirty = false;
+        Entry.CanSave = true;
+        Entry.OwningPackPath = Pack.Path;
+        Entries.push_back(std::move(Entry));
+      }
+    }
+
+    return Entries;
+  }
+
+  std::expected<AssetCatalogEntry, std::string> AssetManager::FindAssetCatalog(const std::string& Name) const
+  {
+    CookedAsset RuntimeAsset{};
+    if (m_Impl->TryFindRuntimeAssetByName(Name, RuntimeAsset))
+    {
+      AssetCatalogEntry Entry{};
+      Entry.Info = ToAssetInfo(RuntimeAsset);
+      Entry.Origin = EAssetOrigin::RuntimeMemory;
+      Entry.Dirty = RuntimeAsset.bDirty;
+      Entry.CanSave = true;
+      return Entry;
+    }
+
+    auto [Reader, Info, Pack] = m_Impl->FindPackForAssetByName(Name);
+    if (!Reader)
+    {
+      return std::unexpected("Asset not found: " + Name);
+    }
+
+    AssetCatalogEntry Entry{};
+    Entry.Info = Info;
+    Entry.Origin = EAssetOrigin::Pack;
+    Entry.Dirty = false;
+    Entry.CanSave = true;
+    if (Pack)
+    {
+      Entry.OwningPackPath = Pack->Path;
+    }
+    return Entry;
+  }
+
+  std::expected<AssetCatalogEntry, std::string> AssetManager::FindAssetCatalog(AssetId Id) const
+  {
+    CookedAsset RuntimeAsset{};
+    if (m_Impl->TryFindRuntimeAssetById(Id, RuntimeAsset))
+    {
+      AssetCatalogEntry Entry{};
+      Entry.Info = ToAssetInfo(RuntimeAsset);
+      Entry.Origin = EAssetOrigin::RuntimeMemory;
+      Entry.Dirty = RuntimeAsset.bDirty;
+      Entry.CanSave = true;
+      return Entry;
+    }
+
+    auto [Reader, Pack] = m_Impl->FindPackForAsset(Id);
+    if (!Reader)
+    {
+      return std::unexpected("Asset not found: " + Id.ToString());
+    }
+
+    auto InfoResult = Reader->FindAsset(Id);
+    if (!InfoResult.has_value())
+    {
+      return std::unexpected(InfoResult.error());
+    }
+
+    AssetCatalogEntry Entry{};
+    Entry.Info = *InfoResult;
+    Entry.Origin = EAssetOrigin::Pack;
+    Entry.Dirty = false;
+    Entry.CanSave = true;
+    if (Pack)
+    {
+      Entry.OwningPackPath = Pack->Path;
+    }
+    return Entry;
+  }
+
   std::expected<UniqueVoidPtr, std::string> AssetManager::LoadAnyByName(const std::string& Name, std::type_index RuntimeType, std::any Params)
   {
+    CookedAsset RuntimeAsset{};
+    if (m_Impl->TryFindRuntimeAssetByName(Name, RuntimeAsset))
+    {
+      return LoadFromRuntimeAsset(RuntimeAsset, RuntimeType, std::move(Params));
+    }
+
     // Find the asset in mounted packs
     auto [Reader, Info, Pack] = m_Impl->FindPackForAssetByName(Name);
 
@@ -366,6 +585,12 @@ namespace SnAPI::AssetPipeline
 
   std::expected<UniqueVoidPtr, std::string> AssetManager::LoadAnyById(AssetId Id, std::type_index RuntimeType, std::any Params)
   {
+    CookedAsset RuntimeAsset{};
+    if (m_Impl->TryFindRuntimeAssetById(Id, RuntimeAsset))
+    {
+      return LoadFromRuntimeAsset(RuntimeAsset, RuntimeType, std::move(Params));
+    }
+
     // Find the asset
     auto [Reader, Pack] = m_Impl->FindPackForAsset(Id);
     if (!Reader)
@@ -428,6 +653,19 @@ namespace SnAPI::AssetPipeline
 
   size_t AssetManager::EstimateAssetSize(AssetId Id, std::type_index RuntimeType)
   {
+    (void)RuntimeType;
+
+    CookedAsset RuntimeAsset{};
+    if (m_Impl->TryFindRuntimeAssetById(Id, RuntimeAsset))
+    {
+      size_t TotalSize = RuntimeAsset.Cooked.Bytes.size();
+      for (const auto& Chunk : RuntimeAsset.Bulk)
+      {
+        TotalSize += Chunk.Bytes.size();
+      }
+      return TotalSize > 0 ? TotalSize : 1024;
+    }
+
     // Try to get size from asset info
     auto [Reader, Pack] = m_Impl->FindPackForAsset(Id);
     if (!Reader)
@@ -592,19 +830,258 @@ namespace SnAPI::AssetPipeline
 
   std::expected<void, std::string> AssetManager::SaveRuntimeAssets()
   {
-    return m_Impl->Engine->SaveAll();
+    auto EngineSaveResult = m_Impl->Engine->SaveAll();
+    if (!EngineSaveResult.has_value())
+    {
+      return EngineSaveResult;
+    }
+
+    std::vector<CookedAsset> DirtyRuntimeAssets{};
+    {
+      std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+      DirtyRuntimeAssets.reserve(m_Impl->RuntimeAssetsById.size());
+      for (const auto& [Id, Asset] : m_Impl->RuntimeAssetsById)
+      {
+        if (Asset.bDirty)
+        {
+          DirtyRuntimeAssets.push_back(Asset);
+        }
+      }
+    }
+
+    if (DirtyRuntimeAssets.empty())
+    {
+      return {};
+    }
+
+    if (m_Impl->Config.PipelineConfig.OutputPackPath.empty())
+    {
+      return std::unexpected("No OutputPackPath configured - cannot save runtime memory assets");
+    }
+
+    AssetPackWriter Writer{};
+    for (const auto& Asset : DirtyRuntimeAssets)
+    {
+      Writer.AddAsset(ToPackEntry(Asset));
+    }
+
+    std::expected<void, std::string> WriteResult{};
+    if (std::filesystem::exists(m_Impl->Config.PipelineConfig.OutputPackPath))
+    {
+      WriteResult = Writer.AppendUpdate(m_Impl->Config.PipelineConfig.OutputPackPath);
+    }
+    else
+    {
+      WriteResult = Writer.Write(m_Impl->Config.PipelineConfig.OutputPackPath);
+    }
+
+    if (!WriteResult.has_value())
+    {
+      return std::unexpected("Failed to write runtime assets: " + WriteResult.error());
+    }
+
+    {
+      std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+      for (const auto& Asset : DirtyRuntimeAssets)
+      {
+        auto It = m_Impl->RuntimeAssetsById.find(Asset.Id);
+        if (It != m_Impl->RuntimeAssetsById.end())
+        {
+          It->second.bDirty = false;
+        }
+      }
+    }
+
+    return {};
   }
 
   uint32_t AssetManager::GetDirtyAssetCount() const
   {
-    return m_Impl->Engine->GetDirtyCount();
+    uint32_t DirtyCount = m_Impl->Engine->GetDirtyCount();
+    std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+    for (const auto& [Id, Asset] : m_Impl->RuntimeAssetsById)
+    {
+      if (Asset.bDirty)
+      {
+        ++DirtyCount;
+      }
+    }
+    return DirtyCount;
+  }
+
+  std::expected<AssetId, std::string> AssetManager::UpsertRuntimeAsset(RuntimeAssetUpsert Asset)
+  {
+    if (Asset.Name.empty())
+    {
+      return std::unexpected("Runtime asset name cannot be empty");
+    }
+    if (Asset.Cooked.PayloadType.IsNull())
+    {
+      return std::unexpected("Runtime asset cooked payload type cannot be null");
+    }
+    if (Asset.Id.IsNull())
+    {
+      Asset.Id = AssetId::Generate();
+    }
+
+    CookedAsset Cooked{};
+    Cooked.Id = Asset.Id;
+    Cooked.LogicalName = std::move(Asset.Name);
+    Cooked.AssetKind = Asset.AssetKind;
+    Cooked.Cooked = std::move(Asset.Cooked);
+    Cooked.Bulk = std::move(Asset.Bulk);
+    Cooked.bDirty = Asset.Dirty;
+
+    std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+
+    const auto ExistingByName = m_Impl->RuntimeAssetNameToId.find(Cooked.LogicalName);
+    if (ExistingByName != m_Impl->RuntimeAssetNameToId.end() && ExistingByName->second != Cooked.Id)
+    {
+      return std::unexpected("A different runtime asset already uses name: " + Cooked.LogicalName);
+    }
+
+    if (const auto ExistingAsset = m_Impl->RuntimeAssetsById.find(Cooked.Id); ExistingAsset != m_Impl->RuntimeAssetsById.end())
+    {
+      m_Impl->RuntimeAssetNameToId.erase(ExistingAsset->second.LogicalName);
+    }
+
+    m_Impl->RuntimeAssetNameToId[Cooked.LogicalName] = Cooked.Id;
+    m_Impl->RuntimeAssetsById[Cooked.Id] = std::move(Cooked);
+    return Asset.Id;
+  }
+
+  std::expected<void, std::string> AssetManager::RenameRuntimeAsset(const AssetId Id, const std::string& NewName)
+  {
+    if (NewName.empty())
+    {
+      return std::unexpected("Runtime asset name cannot be empty");
+    }
+
+    std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+    const auto AssetIt = m_Impl->RuntimeAssetsById.find(Id);
+    if (AssetIt == m_Impl->RuntimeAssetsById.end())
+    {
+      return std::unexpected("Runtime asset not found: " + Id.ToString());
+    }
+
+    const auto NameIt = m_Impl->RuntimeAssetNameToId.find(NewName);
+    if (NameIt != m_Impl->RuntimeAssetNameToId.end() && NameIt->second != Id)
+    {
+      return std::unexpected("A different runtime asset already uses name: " + NewName);
+    }
+
+    m_Impl->RuntimeAssetNameToId.erase(AssetIt->second.LogicalName);
+    AssetIt->second.LogicalName = NewName;
+    AssetIt->second.bDirty = true;
+    m_Impl->RuntimeAssetNameToId[AssetIt->second.LogicalName] = AssetIt->first;
+    return {};
+  }
+
+  std::expected<void, std::string> AssetManager::DeleteRuntimeAsset(const AssetId Id)
+  {
+    {
+      std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+      const auto AssetIt = m_Impl->RuntimeAssetsById.find(Id);
+      if (AssetIt == m_Impl->RuntimeAssetsById.end())
+      {
+        return std::unexpected("Runtime asset not found: " + Id.ToString());
+      }
+
+      m_Impl->RuntimeAssetNameToId.erase(AssetIt->second.LogicalName);
+      m_Impl->RuntimeAssetsById.erase(AssetIt);
+    }
+
+    // Deleting by ID invalidates any typed cache entry for this asset.
+    m_Impl->Cache->ClearAll();
+    return {};
+  }
+
+  std::expected<void, std::string> AssetManager::SaveRuntimeAsset(const AssetId Id, const std::string& PackPath)
+  {
+    if (PackPath.empty())
+    {
+      return std::unexpected("PackPath cannot be empty");
+    }
+
+    CookedAsset RuntimeAsset{};
+    {
+      std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+      const auto It = m_Impl->RuntimeAssetsById.find(Id);
+      if (It == m_Impl->RuntimeAssetsById.end())
+      {
+        return std::unexpected("Runtime asset not found: " + Id.ToString());
+      }
+      RuntimeAsset = It->second;
+    }
+
+    std::filesystem::path OutputPath(PackPath);
+    if (OutputPath.has_parent_path())
+    {
+      std::error_code Error{};
+      std::filesystem::create_directories(OutputPath.parent_path(), Error);
+      if (Error)
+      {
+        return std::unexpected("Failed to create runtime asset output directory: " + Error.message());
+      }
+    }
+
+    AssetPackWriter Writer{};
+    Writer.AddAsset(ToPackEntry(RuntimeAsset));
+
+    std::expected<void, std::string> WriteResult{};
+    if (std::filesystem::exists(OutputPath))
+    {
+      WriteResult = Writer.AppendUpdate(OutputPath.string());
+    }
+    else
+    {
+      WriteResult = Writer.Write(OutputPath.string());
+    }
+
+    if (!WriteResult.has_value())
+    {
+      return std::unexpected("Failed to save runtime asset: " + WriteResult.error());
+    }
+
+    {
+      std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+      auto It = m_Impl->RuntimeAssetsById.find(Id);
+      if (It != m_Impl->RuntimeAssetsById.end())
+      {
+        It->second.bDirty = false;
+      }
+    }
+
+    // Ensure destination pack is mounted so discovery immediately reflects saved data.
+    if (std::find_if(m_Impl->Packs.begin(), m_Impl->Packs.end(), [&OutputPath](const MountedPack& Pack) { return Pack.Path == OutputPath.string(); }) ==
+        m_Impl->Packs.end())
+    {
+      (void)MountPack(OutputPath.string());
+    }
+
+    return {};
   }
 
   std::expected<AssetId, std::string> AssetManager::TryPipelineSource(const std::string& Name)
   {
     if (m_Impl->Engine->HasAsset(Name))
     {
-      return m_Impl->Engine->GetAssetId(Name);
+      auto ExistingId = m_Impl->Engine->GetAssetId(Name);
+      if (!ExistingId.has_value())
+      {
+        return std::unexpected(ExistingId.error());
+      }
+
+      auto CookedAssetResult = m_Impl->Engine->GetCookedAsset(Name);
+      if (CookedAssetResult.has_value())
+      {
+        const auto& Cooked = CookedAssetResult->get();
+        std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+        m_Impl->RuntimeAssetsById[Cooked.Id] = Cooked;
+        m_Impl->RuntimeAssetNameToId[Cooked.LogicalName] = Cooked.Id;
+      }
+
+      return ExistingId;
     }
 
     auto Resolved = m_Impl->SourceResolver->Resolve(Name);
@@ -618,6 +1095,16 @@ namespace SnAPI::AssetPipeline
     {
       return std::unexpected(Result.error());
     }
+
+    auto CookedAssetResult = m_Impl->Engine->GetCookedAsset(Result->LogicalName);
+    if (CookedAssetResult.has_value())
+    {
+      const auto& Cooked = CookedAssetResult->get();
+      std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+      m_Impl->RuntimeAssetsById[Cooked.Id] = Cooked;
+      m_Impl->RuntimeAssetNameToId[Cooked.LogicalName] = Cooked.Id;
+    }
+
     return Result->Id;
   }
 
@@ -629,8 +1116,12 @@ namespace SnAPI::AssetPipeline
     {
       return std::unexpected(AssetResult.error());
     }
-    const auto& Asset = AssetResult->get();
+    return LoadFromRuntimeAsset(AssetResult->get(), RuntimeType, std::move(Params));
+  }
 
+  std::expected<UniqueVoidPtr, std::string> AssetManager::LoadFromRuntimeAsset(
+      const CookedAsset& Asset, const std::type_index RuntimeType, std::any Params)
+  {
     // Find factory for this runtime type
     auto FactoryIt = m_Impl->FactoriesByRuntimeType.find(RuntimeType);
     if (FactoryIt == m_Impl->FactoriesByRuntimeType.end())
@@ -648,14 +1139,7 @@ namespace SnAPI::AssetPipeline
     }
 
     // Build AssetInfo for the context
-    AssetInfo Info;
-    Info.Id = Asset.Id;
-    Info.Id = Asset.Id;
-    Info.AssetKind = Asset.AssetKind;
-    Info.CookedPayloadType = Asset.Cooked.PayloadType;
-    Info.SchemaVersion = 0;
-    Info.Name = Asset.LogicalName;
-    Info.BulkChunkCount = static_cast<uint32_t>(Asset.Bulk.size());
+    const AssetInfo Info = ToAssetInfo(Asset);
 
     // Create load context with in-memory data
     const auto& BulkChunks = Asset.Bulk;

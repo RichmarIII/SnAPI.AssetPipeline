@@ -1,12 +1,14 @@
 #pragma once
 
 #include <any>
+#include <cstdint>
 #include <expected>
 #include <functional>
 #include <memory>
 #include <string>
 #include <typeindex>
 #include <unordered_map>
+#include <vector>
 
 #include "Export.h"
 #include "Uuid.h"
@@ -20,6 +22,8 @@
 
 namespace SnAPI::AssetPipeline
 {
+
+struct CookedAsset;
 
 // Context passed to asset factories during loading
 struct AssetLoadContext
@@ -140,6 +144,31 @@ struct SNAPI_ASSETPIPELINE_API AssetManagerConfig
 
     // Auto-save dirty assets on AssetManager destruction
     bool bAutoSave = false;
+};
+
+enum class EAssetOrigin : std::uint8_t
+{
+    Pack = 0,
+    RuntimeMemory = 1,
+};
+
+struct SNAPI_ASSETPIPELINE_API RuntimeAssetUpsert
+{
+    AssetId Id{};
+    std::string Name{};
+    TypeId AssetKind{};
+    TypedPayload Cooked{};
+    std::vector<BulkChunk> Bulk{};
+    bool Dirty = true;
+};
+
+struct SNAPI_ASSETPIPELINE_API AssetCatalogEntry
+{
+    AssetInfo Info{};
+    EAssetOrigin Origin = EAssetOrigin::Pack;
+    bool Dirty = false;
+    bool CanSave = false;
+    std::string OwningPackPath{};
 };
 
 // Asset manager - manages pack readers, caching, and provides Load<T>() API
@@ -293,6 +322,15 @@ public:
     // List all assets in mounted packs
     std::vector<AssetInfo> ListAssets() const;
 
+    // List all discovered assets with origin/dirty/save metadata.
+    std::vector<AssetCatalogEntry> ListAssetCatalog() const;
+
+    // Find a discovered asset by name with metadata.
+    std::expected<AssetCatalogEntry, std::string> FindAssetCatalog(const std::string& Name) const;
+
+    // Find a discovered asset by id with metadata.
+    std::expected<AssetCatalogEntry, std::string> FindAssetCatalog(AssetId Id) const;
+
     // ========== Cache Management ==========
 
     AssetCache& GetCache();
@@ -337,6 +375,18 @@ public:
     // Get number of dirty (unsaved) runtime-pipelined assets
     uint32_t GetDirtyAssetCount() const;
 
+    // Insert/update a runtime memory asset.
+    std::expected<AssetId, std::string> UpsertRuntimeAsset(RuntimeAssetUpsert Asset);
+
+    // Rename a runtime memory asset.
+    std::expected<void, std::string> RenameRuntimeAsset(AssetId Id, const std::string& NewName);
+
+    // Delete a runtime memory asset.
+    std::expected<void, std::string> DeleteRuntimeAsset(AssetId Id);
+
+    // Save a runtime memory asset to a pack path and mark it clean.
+    std::expected<void, std::string> SaveRuntimeAsset(AssetId Id, const std::string& PackPath);
+
     // ========== Internal (for AsyncLoader) ==========
 
     std::expected<UniqueVoidPtr, std::string> LoadAnyByName(const std::string& Name, std::type_index RuntimeType, std::any Params = {});
@@ -356,6 +406,7 @@ private:
     size_t EstimateAssetSize(AssetId Id, std::type_index RuntimeType);
 
     std::expected<AssetId, std::string> TryPipelineSource(const std::string& Name);
+    std::expected<UniqueVoidPtr, std::string> LoadFromRuntimeAsset(const CookedAsset& Asset, std::type_index RuntimeType, std::any Params = {});
     std::expected<UniqueVoidPtr, std::string> LoadFromRuntimePipeline(const std::string& Name, std::type_index RuntimeType, std::any Params = {});
 
     struct Impl;
