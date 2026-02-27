@@ -2,6 +2,7 @@
 
 #include <any>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <functional>
 #include <memory>
@@ -51,19 +52,46 @@ struct AssetLoadContext
     template<typename T>
     std::expected<T, std::string> DeserializeCooked() const
     {
-        const IPayloadSerializer* Serializer = Registry.Find(Cooked.PayloadType);
-        if (!Serializer)
+        try
         {
-            return std::unexpected("No serializer found for payload type: " + Cooked.PayloadType.ToString());
-        }
+            const IPayloadSerializer* Serializer = Registry.Find(Cooked.PayloadType);
+            if (!Serializer)
+            {
+                return std::unexpected("No serializer found for payload type: " + Cooked.PayloadType.ToString());
+            }
 
-        T Result{};
-        if (!Serializer->DeserializeFromBytes(&Result, Cooked.Bytes.data(), Cooked.Bytes.size()))
+            std::vector<uint8_t> Bytes = Cooked.Bytes;
+            const uint32_t TargetSchemaVersion = Serializer->GetSchemaVersion();
+            if (Cooked.SchemaVersion != TargetSchemaVersion &&
+                !Serializer->MigrateBytes(Cooked.SchemaVersion, TargetSchemaVersion, Bytes))
+            {
+                return std::unexpected("Payload schema mismatch and serializer migration failed: from " +
+                                       std::to_string(Cooked.SchemaVersion) + " to " +
+                                       std::to_string(TargetSchemaVersion));
+            }
+
+            T Result{};
+            if (!Serializer->DeserializeFromBytes(&Result, Bytes.data(), Bytes.size()))
+            {
+                std::string Error = "Failed to deserialize payload bytes for type " + Cooked.PayloadType.ToString() +
+                                    " at schema " + std::to_string(Cooked.SchemaVersion);
+                if (Cooked.SchemaVersion == TargetSchemaVersion)
+                {
+                    Error += " (schema versions match; possible schema change without version bump)";
+                }
+                return std::unexpected(std::move(Error));
+            }
+
+            return Result;
+        }
+        catch (const std::exception& Ex)
         {
-            return std::unexpected("Failed to deserialize payload");
+            return std::unexpected("Exception while deserializing payload: " + std::string(Ex.what()));
         }
-
-        return Result;
+        catch (...)
+        {
+            return std::unexpected("Unknown exception while deserializing payload");
+        }
     }
 };
 
@@ -144,6 +172,10 @@ struct SNAPI_ASSETPIPELINE_API AssetManagerConfig
 
     // Auto-save dirty assets on AssetManager destruction
     bool bAutoSave = false;
+
+    // When true, load failures throw after warning diagnostics are emitted.
+    // Intended for debug/CI fail-fast workflows.
+    bool bFatalOnLoadError = false;
 };
 
 enum class EAssetOrigin : std::uint8_t
@@ -175,6 +207,16 @@ struct SNAPI_ASSETPIPELINE_API AssetCatalogEntry
 class SNAPI_ASSETPIPELINE_API AssetManager
 {
 public:
+    using LoadWarningObserver = std::function<void(const AssetInfo* Info, const std::string& Message)>;
+    using PayloadMigrationFn = std::function<std::expected<void, std::string>(std::vector<uint8_t>& InOutBytes)>;
+    using PayloadMigrationObserver =
+        std::function<void(const AssetInfo& Info,
+                           TypeId PayloadType,
+                           uint32_t FromVersion,
+                           uint32_t ToVersion,
+                           bool Success,
+                           const std::string& Message)>;
+
     explicit AssetManager(const AssetManagerConfig& Config = {});
     ~AssetManager();
 
@@ -369,6 +411,29 @@ public:
     void RegisterCooker(std::unique_ptr<IAssetCooker> Cooker);
     void RegisterSerializer(std::unique_ptr<IPayloadSerializer> Serializer);
 
+    // Register a payload migration step for one schema version transition.
+    // Migrations can be chained automatically (e.g. 1->2->3).
+    void RegisterPayloadMigration(TypeId PayloadType, uint32_t FromVersion, uint32_t ToVersion, PayloadMigrationFn Callback);
+
+    // Remove one migration step.
+    void UnregisterPayloadMigration(TypeId PayloadType, uint32_t FromVersion, uint32_t ToVersion);
+
+    // Remove all migration steps for one payload type.
+    void ClearPayloadMigrations(TypeId PayloadType);
+
+    // Remove all migration steps for all payload types.
+    void ClearAllPayloadMigrations();
+
+    // Observer invoked whenever a schema mismatch triggers migration handling.
+    void SetOnPayloadMigration(PayloadMigrationObserver Callback);
+
+    // Observer invoked when load/migration/deserialization fails.
+    void SetOnLoadWarning(LoadWarningObserver Callback);
+
+    // Enable/disable fail-fast behavior for load failures.
+    void SetFatalOnLoadErrorEnabled(bool bEnabled);
+    bool IsFatalOnLoadErrorEnabled() const;
+
     // Save all dirty runtime-pipelined assets to disk
     std::expected<void, std::string> SaveRuntimeAssets();
 
@@ -401,6 +466,13 @@ public:
     AssetManager& operator=(AssetManager&&) noexcept;
 
 private:
+    std::expected<TypedPayload, std::string> ResolveCookedPayloadForLoad(const TypedPayload& Payload, const AssetInfo& Info) const;
+    void ReportLoadWarning(const AssetInfo* Info, const std::string& Message) const;
+    std::expected<UniqueVoidPtr, std::string> InvokeFactoryLoad(
+        IAssetFactory& Factory,
+        const AssetLoadContext& Context,
+        const AssetInfo& Info) const;
+
     void RegisterFactoryImpl(std::type_index RuntimeType, std::unique_ptr<IAssetFactory> Factory);
     std::expected<AssetId, std::string> ResolveAssetId(const std::string& Name, std::type_index RuntimeType);
     size_t EstimateAssetSize(AssetId Id, std::type_index RuntimeType);

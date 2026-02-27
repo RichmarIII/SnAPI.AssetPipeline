@@ -6,8 +6,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
+#include <queue>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -16,6 +19,32 @@ namespace SnAPI::AssetPipeline
 {
   namespace
   {
+    struct PayloadMigrationKey
+    {
+      TypeId PayloadType{};
+      uint32_t FromVersion = 0;
+      uint32_t ToVersion = 0;
+
+      bool operator==(const PayloadMigrationKey& Other) const noexcept
+      {
+        return PayloadType == Other.PayloadType &&
+               FromVersion == Other.FromVersion &&
+               ToVersion == Other.ToVersion;
+      }
+    };
+
+    struct PayloadMigrationKeyHash
+    {
+      size_t operator()(const PayloadMigrationKey& Key) const noexcept
+      {
+        const size_t TypeHash = UuidHash{}(Key.PayloadType);
+        const size_t FromHash = std::hash<uint32_t>{}(Key.FromVersion);
+        const size_t ToHash = std::hash<uint32_t>{}(Key.ToVersion);
+        return TypeHash ^ (FromHash + 0x9e3779b9u + (TypeHash << 6) + (TypeHash >> 2)) ^
+               (ToHash + 0x9e3779b9u + (TypeHash << 6) + (TypeHash >> 2));
+      }
+    };
+
     [[nodiscard]] AssetInfo ToAssetInfo(const CookedAsset& Asset)
     {
       AssetInfo Info{};
@@ -83,6 +112,12 @@ namespace SnAPI::AssetPipeline
       mutable std::mutex RuntimeAssetsMutex{};
       std::unordered_map<AssetId, CookedAsset, UuidHash> RuntimeAssetsById{};
       std::unordered_map<std::string, AssetId> RuntimeAssetNameToId{};
+
+      // Payload migration steps and optional observer.
+      mutable std::mutex PayloadMigrationMutex{};
+      std::unordered_map<PayloadMigrationKey, AssetManager::PayloadMigrationFn, PayloadMigrationKeyHash> PayloadMigrations{};
+      AssetManager::PayloadMigrationObserver OnPayloadMigration{};
+      AssetManager::LoadWarningObserver OnLoadWarning{};
 
       // Parent pointer for async loader
       AssetManager* Parent = nullptr;
@@ -571,8 +606,16 @@ namespace SnAPI::AssetPipeline
       return std::unexpected(PayloadResult.error());
     }
 
+    auto MigratedPayloadResult = ResolveCookedPayloadForLoad(*PayloadResult, Info);
+    if (!MigratedPayloadResult.has_value())
+    {
+      ReportLoadWarning(&Info, MigratedPayloadResult.error());
+      return std::unexpected(MigratedPayloadResult.error());
+    }
+    TypedPayload CookedPayload = std::move(*MigratedPayloadResult);
+
     // Create load context
-    AssetLoadContext Context{.Cooked = *PayloadResult,
+    AssetLoadContext Context{.Cooked = CookedPayload,
                              .Info = Info,
                              .LoadBulk = [Reader, Id = Info.Id](uint32_t Index) { return Reader->LoadBulkChunk(Id, Index); },
                              .GetBulkInfo = [Reader, Id = Info.Id](uint32_t Index) { return Reader->GetBulkChunkInfo(Id, Index); },
@@ -580,7 +623,7 @@ namespace SnAPI::AssetPipeline
                              .Params = std::move(Params)};
 
     // Invoke factory
-    return Factory->Load(Context);
+    return InvokeFactoryLoad(*Factory, Context, Info);
   }
 
   std::expected<UniqueVoidPtr, std::string> AssetManager::LoadAnyById(AssetId Id, std::type_index RuntimeType, std::any Params)
@@ -629,8 +672,16 @@ namespace SnAPI::AssetPipeline
       return std::unexpected(PayloadResult.error());
     }
 
+    auto MigratedPayloadResult = ResolveCookedPayloadForLoad(*PayloadResult, Info);
+    if (!MigratedPayloadResult.has_value())
+    {
+      ReportLoadWarning(&Info, MigratedPayloadResult.error());
+      return std::unexpected(MigratedPayloadResult.error());
+    }
+    TypedPayload CookedPayload = std::move(*MigratedPayloadResult);
+
     // Create load context
-    AssetLoadContext Context{.Cooked = *PayloadResult,
+    AssetLoadContext Context{.Cooked = CookedPayload,
                              .Info = Info,
                              .LoadBulk = [Reader, Id](uint32_t Index) { return Reader->LoadBulkChunk(Id, Index); },
                              .GetBulkInfo = [Reader, Id](uint32_t Index) { return Reader->GetBulkChunkInfo(Id, Index); },
@@ -638,7 +689,7 @@ namespace SnAPI::AssetPipeline
                              .Params = std::move(Params)};
 
     // Invoke factory
-    return Factory->Load(Context);
+    return InvokeFactoryLoad(*Factory, Context, Info);
   }
 
   std::expected<AssetId, std::string> AssetManager::ResolveAssetId(const std::string& Name, std::type_index RuntimeType)
@@ -826,6 +877,319 @@ namespace SnAPI::AssetPipeline
   void AssetManager::RegisterSerializer(std::unique_ptr<IPayloadSerializer> Serializer)
   {
     m_Impl->Engine->RegisterSerializer(std::move(Serializer));
+  }
+
+  void AssetManager::RegisterPayloadMigration(
+      const TypeId PayloadType,
+      const uint32_t FromVersion,
+      const uint32_t ToVersion,
+      PayloadMigrationFn Callback)
+  {
+    if (PayloadType.IsNull() || FromVersion == ToVersion || !Callback)
+    {
+      return;
+    }
+
+    std::lock_guard Lock(m_Impl->PayloadMigrationMutex);
+    m_Impl->PayloadMigrations[PayloadMigrationKey{
+        .PayloadType = PayloadType,
+        .FromVersion = FromVersion,
+        .ToVersion = ToVersion}] = std::move(Callback);
+  }
+
+  void AssetManager::UnregisterPayloadMigration(const TypeId PayloadType, const uint32_t FromVersion, const uint32_t ToVersion)
+  {
+    std::lock_guard Lock(m_Impl->PayloadMigrationMutex);
+    m_Impl->PayloadMigrations.erase(PayloadMigrationKey{
+        .PayloadType = PayloadType,
+        .FromVersion = FromVersion,
+        .ToVersion = ToVersion});
+  }
+
+  void AssetManager::ClearPayloadMigrations(const TypeId PayloadType)
+  {
+    std::lock_guard Lock(m_Impl->PayloadMigrationMutex);
+    for (auto It = m_Impl->PayloadMigrations.begin(); It != m_Impl->PayloadMigrations.end();)
+    {
+      if (It->first.PayloadType == PayloadType)
+      {
+        It = m_Impl->PayloadMigrations.erase(It);
+      }
+      else
+      {
+        ++It;
+      }
+    }
+  }
+
+  void AssetManager::ClearAllPayloadMigrations()
+  {
+    std::lock_guard Lock(m_Impl->PayloadMigrationMutex);
+    m_Impl->PayloadMigrations.clear();
+  }
+
+  void AssetManager::SetOnPayloadMigration(PayloadMigrationObserver Callback)
+  {
+    std::lock_guard Lock(m_Impl->PayloadMigrationMutex);
+    m_Impl->OnPayloadMigration = std::move(Callback);
+  }
+
+  void AssetManager::SetOnLoadWarning(LoadWarningObserver Callback)
+  {
+    std::lock_guard Lock(m_Impl->PayloadMigrationMutex);
+    m_Impl->OnLoadWarning = std::move(Callback);
+  }
+
+  void AssetManager::SetFatalOnLoadErrorEnabled(const bool bEnabled)
+  {
+    m_Impl->Config.bFatalOnLoadError = bEnabled;
+  }
+
+  bool AssetManager::IsFatalOnLoadErrorEnabled() const
+  {
+    return m_Impl->Config.bFatalOnLoadError;
+  }
+
+  void AssetManager::ReportLoadWarning(const AssetInfo* Info, const std::string& Message) const
+  {
+    std::string Formatted = "Asset load warning";
+    if (Info)
+    {
+      Formatted += " [name=" + Info->Name + ", id=" + Info->Id.ToString() +
+                   ", payload=" + Info->CookedPayloadType.ToString() +
+                   ", schema=" + std::to_string(Info->SchemaVersion) + "]";
+    }
+    Formatted += ": " + Message;
+
+    LoadWarningObserver Observer{};
+    {
+      std::lock_guard Lock(m_Impl->PayloadMigrationMutex);
+      Observer = m_Impl->OnLoadWarning;
+    }
+
+    if (Observer)
+    {
+      Observer(Info, Formatted);
+    }
+    else
+    {
+      std::fprintf(stderr, "[WARN] %s\n", Formatted.c_str());
+    }
+
+    if (m_Impl->Config.bFatalOnLoadError)
+    {
+      throw std::runtime_error(Formatted);
+    }
+  }
+
+  std::expected<UniqueVoidPtr, std::string> AssetManager::InvokeFactoryLoad(
+      IAssetFactory& Factory, const AssetLoadContext& Context, const AssetInfo& Info) const
+  {
+    try
+    {
+      auto LoadResult = Factory.Load(Context);
+      if (!LoadResult.has_value())
+      {
+        ReportLoadWarning(&Info, LoadResult.error());
+        return std::unexpected(LoadResult.error());
+      }
+      return LoadResult;
+    }
+    catch (const std::exception& Ex)
+    {
+      const std::string Error = "Factory load threw exception: " + std::string(Ex.what());
+      ReportLoadWarning(&Info, Error);
+      return std::unexpected(Error);
+    }
+    catch (...)
+    {
+      const std::string Error = "Factory load threw unknown exception";
+      ReportLoadWarning(&Info, Error);
+      return std::unexpected(Error);
+    }
+  }
+
+  std::expected<TypedPayload, std::string> AssetManager::ResolveCookedPayloadForLoad(const TypedPayload& Payload, const AssetInfo& Info) const
+  {
+    const IPayloadSerializer* Serializer = m_Impl->Engine->GetRegistry().Find(Payload.PayloadType);
+    if (!Serializer)
+    {
+      return std::unexpected("No serializer found for payload type: " + Payload.PayloadType.ToString());
+    }
+
+    const uint32_t TargetSchemaVersion = Serializer->GetSchemaVersion();
+    if (Payload.SchemaVersion == TargetSchemaVersion)
+    {
+      return Payload;
+    }
+
+    PayloadMigrationObserver Observer{};
+    auto NotifyMigration = [&](const uint32_t FromVersion,
+                               const uint32_t ToVersion,
+                               const bool Success,
+                               std::string Message) {
+      {
+        std::lock_guard Lock(m_Impl->PayloadMigrationMutex);
+        Observer = m_Impl->OnPayloadMigration;
+      }
+      if (Observer)
+      {
+        Observer(Info, Payload.PayloadType, FromVersion, ToVersion, Success, Message);
+      }
+    };
+
+    uint32_t CurrentVersion = Payload.SchemaVersion;
+    std::vector<uint8_t> Bytes = Payload.Bytes;
+
+    std::vector<std::pair<uint32_t, PayloadMigrationFn>> MigrationRoute{};
+    {
+      std::lock_guard Lock(m_Impl->PayloadMigrationMutex);
+
+      using MigrationStep = std::pair<uint32_t, PayloadMigrationFn>;
+      std::unordered_map<uint32_t, std::vector<MigrationStep>> Adjacency{};
+      for (const auto& [Key, Callback] : m_Impl->PayloadMigrations)
+      {
+        if (Key.PayloadType != Payload.PayloadType || !Callback)
+        {
+          continue;
+        }
+        Adjacency[Key.FromVersion].emplace_back(Key.ToVersion, Callback);
+      }
+
+      if (!Adjacency.empty())
+      {
+        std::queue<uint32_t> Queue{};
+        std::unordered_map<uint32_t, uint32_t> PreviousNode{};
+        std::unordered_map<uint32_t, PayloadMigrationFn> PreviousStep{};
+
+        Queue.push(CurrentVersion);
+        PreviousNode.emplace(CurrentVersion, CurrentVersion);
+
+        while (!Queue.empty() && !PreviousNode.contains(TargetSchemaVersion))
+        {
+          const uint32_t Node = Queue.front();
+          Queue.pop();
+
+          const auto AdjIt = Adjacency.find(Node);
+          if (AdjIt == Adjacency.end())
+          {
+            continue;
+          }
+
+          for (const auto& [NextVersion, Callback] : AdjIt->second)
+          {
+            if (PreviousNode.contains(NextVersion))
+            {
+              continue;
+            }
+
+            PreviousNode.emplace(NextVersion, Node);
+            PreviousStep.emplace(NextVersion, Callback);
+            Queue.push(NextVersion);
+          }
+        }
+
+        if (PreviousNode.contains(TargetSchemaVersion))
+        {
+          std::vector<MigrationStep> ReverseRoute{};
+          for (uint32_t Cursor = TargetSchemaVersion; Cursor != CurrentVersion; Cursor = PreviousNode[Cursor])
+          {
+            const auto StepIt = PreviousStep.find(Cursor);
+            if (StepIt == PreviousStep.end())
+            {
+              ReverseRoute.clear();
+              break;
+            }
+            ReverseRoute.emplace_back(Cursor, StepIt->second);
+          }
+
+          if (!ReverseRoute.empty())
+          {
+            std::reverse(ReverseRoute.begin(), ReverseRoute.end());
+            MigrationRoute = std::move(ReverseRoute);
+          }
+        }
+      }
+    }
+
+    if (!MigrationRoute.empty())
+    {
+      for (const auto& [NextVersion, Callback] : MigrationRoute)
+      {
+        const uint32_t StepFrom = CurrentVersion;
+        std::expected<void, std::string> StepResult{};
+        try
+        {
+          StepResult = Callback(Bytes);
+        }
+        catch (const std::exception& Ex)
+        {
+          const std::string Error = "Payload migration callback threw for " + Payload.PayloadType.ToString() +
+                                    " (" + std::to_string(StepFrom) + " -> " + std::to_string(NextVersion) + "): " +
+                                    Ex.what();
+          NotifyMigration(StepFrom, NextVersion, false, Error);
+          return std::unexpected(Error);
+        }
+        catch (...)
+        {
+          const std::string Error = "Payload migration callback threw unknown exception for " + Payload.PayloadType.ToString() +
+                                    " (" + std::to_string(StepFrom) + " -> " + std::to_string(NextVersion) + ")";
+          NotifyMigration(StepFrom, NextVersion, false, Error);
+          return std::unexpected(Error);
+        }
+        if (!StepResult.has_value())
+        {
+          const std::string Error = "Payload migration callback failed for " + Payload.PayloadType.ToString() +
+                                    " (" + std::to_string(StepFrom) + " -> " + std::to_string(NextVersion) + "): " +
+                                    StepResult.error();
+          NotifyMigration(StepFrom, NextVersion, false, Error);
+          return std::unexpected(Error);
+        }
+
+        CurrentVersion = NextVersion;
+        NotifyMigration(StepFrom, NextVersion, true, "Applied registered payload migration callback");
+      }
+    }
+
+    if (CurrentVersion != TargetSchemaVersion)
+    {
+      const uint32_t StepFrom = CurrentVersion;
+      bool SerializerMigrationResult = false;
+      try
+      {
+        SerializerMigrationResult = Serializer->MigrateBytes(CurrentVersion, TargetSchemaVersion, Bytes);
+      }
+      catch (const std::exception& Ex)
+      {
+        const std::string Error = "Serializer migration threw exception from schema " + std::to_string(CurrentVersion) +
+                                  " to " + std::to_string(TargetSchemaVersion) + " for payload type " +
+                                  Payload.PayloadType.ToString() + ": " + Ex.what();
+        NotifyMigration(StepFrom, TargetSchemaVersion, false, Error);
+        return std::unexpected(Error);
+      }
+      catch (...)
+      {
+        const std::string Error = "Serializer migration threw unknown exception from schema " + std::to_string(CurrentVersion) +
+                                  " to " + std::to_string(TargetSchemaVersion) + " for payload type " +
+                                  Payload.PayloadType.ToString();
+        NotifyMigration(StepFrom, TargetSchemaVersion, false, Error);
+        return std::unexpected(Error);
+      }
+
+      if (!SerializerMigrationResult)
+      {
+        const std::string Error = "No migration path from schema " + std::to_string(CurrentVersion) +
+                                  " to " + std::to_string(TargetSchemaVersion) + " for payload type " +
+                                  Payload.PayloadType.ToString();
+        NotifyMigration(StepFrom, TargetSchemaVersion, false, Error);
+        return std::unexpected(Error);
+      }
+
+      CurrentVersion = TargetSchemaVersion;
+      NotifyMigration(StepFrom, TargetSchemaVersion, true, "Applied serializer payload migration");
+    }
+
+    return TypedPayload(Payload.PayloadType, CurrentVersion, std::move(Bytes));
   }
 
   std::expected<void, std::string> AssetManager::SaveRuntimeAssets()
@@ -1141,10 +1505,18 @@ namespace SnAPI::AssetPipeline
     // Build AssetInfo for the context
     const AssetInfo Info = ToAssetInfo(Asset);
 
+    auto MigratedPayloadResult = ResolveCookedPayloadForLoad(Asset.Cooked, Info);
+    if (!MigratedPayloadResult.has_value())
+    {
+      ReportLoadWarning(&Info, MigratedPayloadResult.error());
+      return std::unexpected(MigratedPayloadResult.error());
+    }
+    TypedPayload CookedPayload = std::move(*MigratedPayloadResult);
+
     // Create load context with in-memory data
     const auto& BulkChunks = Asset.Bulk;
     AssetLoadContext Context{
-        .Cooked = Asset.Cooked,
+        .Cooked = CookedPayload,
         .Info = Info,
         .LoadBulk = [&BulkChunks](uint32_t Index) -> std::expected<std::vector<uint8_t>, std::string> {
           if (Index >= BulkChunks.size())
@@ -1167,7 +1539,7 @@ namespace SnAPI::AssetPipeline
         .Registry = m_Impl->Engine->GetRegistry(),
         .Params = std::move(Params)};
 
-    return Factory->Load(Context);
+    return InvokeFactoryLoad(*Factory, Context, Info);
   }
 
 } // namespace SnAPI::AssetPipeline

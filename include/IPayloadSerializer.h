@@ -29,8 +29,10 @@ public:
     // Deserialize bytes to an object
     virtual bool DeserializeFromBytes(void* Object, const uint8_t* Bytes, std::size_t Size) const = 0;
 
-    // Optional: Migrate bytes from one schema version to another
-    // Returns false if migration is not supported or fails
+    // Optional: Migrate bytes from one schema version to another.
+    // AssetManager invokes this when payload.SchemaVersion != GetSchemaVersion()
+    // and no registered migration callback chain handled the transition.
+    // Returns false if migration is not supported or fails.
     virtual bool MigrateBytes(uint32_t FromVersion, uint32_t ToVersion, std::vector<uint8_t>& InOutBytes) const
     {
         (void)FromVersion;
