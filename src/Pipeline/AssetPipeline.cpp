@@ -262,7 +262,7 @@ namespace SnAPI::AssetPipeline
 
         // Import
         std::vector<ImportedItem> Items;
-        if (!Importer->Import(Source, Items, *Context))
+        if (!Importer->ImportWithSettings(Source, Config.ImportSettings.get(), Items, *Context))
         {
           LogError("Import failed for: " + Source.Uri);
           return 0;
@@ -279,6 +279,11 @@ namespace SnAPI::AssetPipeline
         // Cook each imported item
         for (auto& Item : Items)
         {
+          if (!Item.ImportSettings)
+          {
+            Item.ImportSettings = Config.ImportSettings;
+          }
+
           // Find cooker
           IAssetCooker* Cooker = Loader->FindCooker(Item.AssetKind, Item.Intermediate.PayloadType);
           if (!Cooker)
@@ -296,6 +301,7 @@ namespace SnAPI::AssetPipeline
           Req.VariantKey = Item.VariantKey;
           Req.Intermediate = std::move(Item.Intermediate);
           Req.Dependencies = std::move(Item.Dependencies);
+          Req.ImportSettings = Item.ImportSettings;
           Req.BuildOptions = Config.BuildOptions;
 
           // Cook
@@ -429,7 +435,7 @@ namespace SnAPI::AssetPipeline
 
         // Import
         std::vector<ImportedItem> Items;
-        if (!Importer->Import(Source, Items, *Context))
+        if (!Importer->ImportWithSettings(Source, Config.ImportSettings.get(), Items, *Context))
         {
           return std::unexpected("Import failed for: " + AbsolutePath);
         }
@@ -444,6 +450,11 @@ namespace SnAPI::AssetPipeline
         // Cook each imported item
         for (auto& Item : Items)
         {
+          if (!Item.ImportSettings)
+          {
+            Item.ImportSettings = Config.ImportSettings;
+          }
+
           Item.LogicalName = LogicalName;
 
           if (Config.bDeterministicAssetIds)
@@ -465,6 +476,7 @@ namespace SnAPI::AssetPipeline
           Req.VariantKey = Item.VariantKey;
           Req.Intermediate = std::move(Item.Intermediate);
           Req.Dependencies = std::move(Item.Dependencies);
+          Req.ImportSettings = Item.ImportSettings;
           Req.BuildOptions = Config.BuildOptions;
 
           CookResult Result;

@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "Export.h"
+#include "IAssetImportSettings.h"
 #include "Uuid.h"
 #include "TypedPayload.h"
 
@@ -35,6 +37,7 @@ struct SNAPI_ASSETPIPELINE_API ImportedItem
 
     TypedPayload Intermediate;
     std::vector<SourceRef> Dependencies;
+    AssetImportSettingsPtr ImportSettings{};
 
     ImportedItem() = default;
 };
@@ -52,6 +55,17 @@ public:
 
     // Import the source and produce one or more ImportedItems
     virtual bool Import(const SourceRef& Source, std::vector<ImportedItem>& OutItems, IPipelineContext& Ctx) = 0;
+
+    // Preferred entry point for typed settings-driven import paths.
+    // Default implementation keeps legacy behavior and ignores settings.
+    virtual bool ImportWithSettings(const SourceRef& Source,
+                                    const IAssetImportSettings* Settings,
+                                    std::vector<ImportedItem>& OutItems,
+                                    IPipelineContext& Ctx)
+    {
+        (void)Settings;
+        return Import(Source, OutItems, Ctx);
+    }
 };
 
 } // namespace AssetPipeline

@@ -53,7 +53,7 @@ The SnPAK format exists to solve several critical problems in game asset distrib
 
 4. **Streaming Support**: Designed with random access in mind, allowing individual assets to be loaded without reading the entire file.
 
-5. **Incremental Updates**: Supports append-update mode for adding new assets to existing packs without full rebuilds.
+5. **Incremental Updates**: Supports append-update mode for adding and replacing assets in existing packs without full rebuilds.
 
 6. **Type Safety**: Each asset carries type information (UUIDs) enabling runtime validation and proper deserialization.
 
@@ -1217,16 +1217,16 @@ This enables O(1) lookup in a hash map, with string comparison only for hash col
 
 ## 16. Append-Update Mode
 
-Append-Update mode allows adding new assets to an existing pack without rewriting the entire file.
+Append-Update mode allows adding and replacing assets in an existing pack without rewriting the entire file.
 
 ### 16.1 How It Works
 
 1. **Open Existing Pack** for read/write
-2. **Seek to End** of file
-3. **Write New String Table** for new assets
-4. **Write New Chunks** for new assets
-5. **Write New Index Block** with reference to previous index
-6. **Update Header** with new index location and flags
+2. **Read Current Header + Active Metadata** (current string table and current index)
+3. **Merge Pending Updates by `AssetId`** (`last update wins`)
+4. **Append New Chunks Only** for added/updated assets
+5. **Write New Active String Table + New Active Index Block** (the new index represents the full active asset set after merge; unchanged assets may continue pointing to older chunk offsets)
+6. **Update Header** with new string table/index locations, previous-index linkage, and append flag
 
 ### 16.2 Index Chain
 
@@ -1257,16 +1257,13 @@ After multiple append operations, the file contains a chain of indices:
 
 ### 16.3 Reading Appended Packs
 
-Readers typically only need the current index. However, they can traverse the chain to find all assets:
+Runtime readers should treat the header's current string table/index as the authoritative active view.
+Previous indices are historical snapshots and are optional for tools (diffing, rollback, audit):
 
 ```c
-void LoadAllAssets(SnPakHeaderV1& header) {
-    LoadIndex(header.IndexOffset, header.IndexSize);
-
-    if (header.Flags & SnPakFlag_HasTrailingIndex) {
-        // Optionally load previous indices
-        LoadIndex(header.PreviousIndexOffset, header.PreviousIndexSize);
-    }
+void LoadActiveAssets(SnPakHeaderV1& header) {
+    LoadStringTable(header.StringTableOffset, header.StringTableSize);
+    LoadIndex(header.IndexOffset, header.IndexSize); // authoritative active set
 }
 ```
 

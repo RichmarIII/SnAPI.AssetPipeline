@@ -6,6 +6,7 @@
 
 #include <fstream>
 #include <filesystem>
+#include <limits>
 #include <unordered_map>
 #include <cstring>
 
@@ -436,113 +437,293 @@ namespace SnAPI::AssetPipeline
 
   std::expected<void, std::string> AssetPackWriter::AppendUpdate(const std::string& PackPath) const
   {
+    if (m_Impl->Assets.empty())
+    {
+      return {};
+    }
+
     std::fstream File(PackPath, std::ios::binary | std::ios::in | std::ios::out);
     if (!File.is_open())
     {
-      // Pack doesn't exist, just write a new one
       return Write(PackPath);
     }
 
-    // FIX #5: Comprehensive header validation for AppendUpdate
-    // Verify the existing pack is valid and compatible before appending
     Pack::SnPakHeaderV1 OldHeader{};
     File.read(reinterpret_cast<char*>(&OldHeader), sizeof(OldHeader));
-
     if (!File.good())
     {
       return std::unexpected("Failed to read existing pack header");
     }
-
     if (std::memcmp(OldHeader.Magic, Pack::kSnPakMagic, 8) != 0)
     {
       return std::unexpected("Invalid pack file magic");
     }
-
-    // Validate version - must be compatible
     if (OldHeader.Version != Pack::kSnPakVersion)
     {
       return std::unexpected("Pack version mismatch - expected " + std::to_string(Pack::kSnPakVersion) +
                              ", got " + std::to_string(OldHeader.Version));
     }
-
-    // Validate header size - ensures struct layout compatibility
     if (OldHeader.HeaderSize != sizeof(Pack::SnPakHeaderV1))
     {
       return std::unexpected("Header size mismatch - pack may be from incompatible version");
     }
-
-    // Validate endian marker - ensures byte order compatibility
     if (OldHeader.EndianMarker != Pack::kEndianMarker)
     {
       return std::unexpected("Endian mismatch - pack was created on different architecture");
     }
 
-    // Validate file size against actual file size
     File.seekg(0, std::ios::end);
-    if (auto ActualFileSize = static_cast<uint64_t>(File.tellg()); OldHeader.FileSize > ActualFileSize)
+    const uint64_t ActualFileSize = static_cast<uint64_t>(File.tellg());
+    if (OldHeader.FileSize > ActualFileSize)
     {
       return std::unexpected("Header FileSize (" + std::to_string(OldHeader.FileSize) +
                              ") exceeds actual file size (" + std::to_string(ActualFileSize) +
                              ") - pack may be truncated");
     }
 
-    File.seekp(0, std::ios::end);
-    uint64_t CurrentOffset = File.tellp();
-
-    // Build string table for new assets
-    std::vector<std::string> StringTable;
-    std::unordered_map<std::string, uint32_t> StringToId;
-    bool bStringTableFrozen = false;
-
-    auto AddString = [&](const std::string& Str) -> uint32_t {
-      if (const auto It = StringToId.find(Str); It != StringToId.end())
+    const auto CheckRange = [ActualFileSize](const uint64_t Offset, const uint64_t Size) {
+      if (Size > ActualFileSize)
       {
-        return It->second;
+        return false;
       }
-      if (bStringTableFrozen)
+      if (Offset > ActualFileSize - Size)
       {
-        throw std::runtime_error("StringTable frozen: attempted to add new string '" + Str + "'");
+        return false;
       }
-      auto Id = static_cast<uint32_t>(StringTable.size());
-      StringTable.push_back(Str);
-      StringToId[Str] = Id;
-      return Id;
+      return true;
     };
 
-    // Lookup function for use after string table is frozen
-    auto GetStringId = [&](const std::string& Str) -> uint32_t {
-      const auto It = StringToId.find(Str);
-      if (It == StringToId.end())
-      {
-        throw std::runtime_error("String not found in frozen table: '" + Str + "'");
-      }
-      return It->second;
-    };
-
-    for (auto& Asset : m_Impl->Assets)
+    if (!CheckRange(OldHeader.StringTableOffset, OldHeader.StringTableSize))
     {
-      AddString(Asset.Name);
-      if (!Asset.VariantKey.empty())
+      return std::unexpected("String table offset/size exceeds file bounds");
+    }
+
+    File.seekg(static_cast<std::streamoff>(OldHeader.StringTableOffset), std::ios::beg);
+    if (!File.good())
+    {
+      return std::unexpected("Failed to seek to string table");
+    }
+
+    Pack::SnPakStrBlockHeaderV1 StringHeader{};
+    File.read(reinterpret_cast<char*>(&StringHeader), sizeof(StringHeader));
+    if (!File.good())
+    {
+      return std::unexpected("Failed to read string table header");
+    }
+    if (std::memcmp(StringHeader.Magic, Pack::kStringMagic, 4) != 0)
+    {
+      return std::unexpected("Invalid string table magic");
+    }
+    if (StringHeader.Version != 1)
+    {
+      return std::unexpected("Unsupported string table version: " + std::to_string(StringHeader.Version));
+    }
+    if (StringHeader.BlockSize != OldHeader.StringTableSize)
+    {
+      return std::unexpected("String table BlockSize mismatch with header");
+    }
+    if (StringHeader.StringCount > (std::numeric_limits<size_t>::max() / sizeof(uint32_t)))
+    {
+      return std::unexpected("String table count exceeds host addressable range");
+    }
+
+    const size_t ExistingOffsetsSize = static_cast<size_t>(StringHeader.StringCount) * sizeof(uint32_t);
+    if (StringHeader.BlockSize < sizeof(Pack::SnPakStrBlockHeaderV1) + ExistingOffsetsSize)
+    {
+      return std::unexpected("String table block size too small for offsets");
+    }
+
+    std::vector<uint32_t> ExistingStringOffsets(StringHeader.StringCount);
+    if (!ExistingStringOffsets.empty())
+    {
+      File.read(reinterpret_cast<char*>(ExistingStringOffsets.data()), static_cast<std::streamsize>(ExistingOffsetsSize));
+      if (!File.good())
       {
-        AddString(Asset.VariantKey);
+        return std::unexpected("Failed to read string table offsets");
       }
     }
 
-    // Write new string table
-    uint64_t NewStringTableOffset = CurrentOffset;
-    std::vector<uint8_t> StringTableData = Impl::BuildStringTableBlock(StringTable);
-    File.write(reinterpret_cast<const char*>(StringTableData.data()), StringTableData.size());
-    CurrentOffset += StringTableData.size();
-
-    // Freeze string table - no new strings allowed after serialization
-    bStringTableFrozen = true;
-
-    // Write new chunks and build index entries
-    std::vector<Pack::SnPakIndexEntryV1> IndexEntries;
-    std::vector<Pack::SnPakBulkEntryV1> BulkEntries;
-
-    for (auto& Asset : m_Impl->Assets)
+    const size_t ExistingStringDataSize =
+        static_cast<size_t>(StringHeader.BlockSize - sizeof(Pack::SnPakStrBlockHeaderV1) - ExistingOffsetsSize);
+    std::vector<uint8_t> ExistingStringData(ExistingStringDataSize);
+    if (!ExistingStringData.empty())
     {
+      File.read(reinterpret_cast<char*>(ExistingStringData.data()), static_cast<std::streamsize>(ExistingStringDataSize));
+      if (!File.good())
+      {
+        return std::unexpected("Failed to read string table data");
+      }
+    }
+
+    std::vector<std::string> StringTable{};
+    StringTable.reserve(static_cast<size_t>(StringHeader.StringCount) + m_Impl->Assets.size() * 2u);
+    std::unordered_map<std::string, uint32_t> StringToId{};
+    StringToId.reserve(static_cast<size_t>(StringHeader.StringCount) + m_Impl->Assets.size() * 2u);
+
+    for (uint32_t StringIndex = 0; StringIndex < StringHeader.StringCount; ++StringIndex)
+    {
+      const uint32_t Offset = ExistingStringOffsets[StringIndex];
+      if (Offset >= ExistingStringDataSize)
+      {
+        return std::unexpected("String table offset " + std::to_string(StringIndex) + " out of range");
+      }
+
+      const uint8_t* const Start = ExistingStringData.data() + Offset;
+      const size_t MaxLen = ExistingStringDataSize - Offset;
+      const void* const NullPos = std::memchr(Start, 0, MaxLen);
+      if (NullPos == nullptr)
+      {
+        return std::unexpected("String table entry " + std::to_string(StringIndex) + " missing null terminator");
+      }
+
+      const size_t Length = static_cast<const uint8_t*>(NullPos) - Start;
+      std::string StringValue(reinterpret_cast<const char*>(Start), Length);
+      StringTable.push_back(StringValue);
+      StringToId.try_emplace(StringValue, StringIndex);
+    }
+
+    if (!CheckRange(OldHeader.IndexOffset, OldHeader.IndexSize))
+    {
+      return std::unexpected("Index offset/size exceeds file bounds");
+    }
+
+    File.seekg(static_cast<std::streamoff>(OldHeader.IndexOffset), std::ios::beg);
+    if (!File.good())
+    {
+      return std::unexpected("Failed to seek to index block");
+    }
+
+    Pack::SnPakIndexHeaderV1 OldIndexHeader{};
+    File.read(reinterpret_cast<char*>(&OldIndexHeader), sizeof(OldIndexHeader));
+    if (!File.good())
+    {
+      return std::unexpected("Failed to read index header");
+    }
+    if (std::memcmp(OldIndexHeader.Magic, Pack::kIndexMagic, 4) != 0)
+    {
+      return std::unexpected("Invalid index magic");
+    }
+    if (OldIndexHeader.Version != 1)
+    {
+      return std::unexpected("Unsupported index version: " + std::to_string(OldIndexHeader.Version));
+    }
+    if (OldIndexHeader.BlockSize != OldHeader.IndexSize)
+    {
+      return std::unexpected("Index BlockSize mismatch with header");
+    }
+
+    const uint64_t ExistingIndexEntriesSize = static_cast<uint64_t>(OldIndexHeader.EntryCount) * sizeof(Pack::SnPakIndexEntryV1);
+    const uint64_t ExistingBulkEntriesSize = static_cast<uint64_t>(OldIndexHeader.BulkEntryCount) * sizeof(Pack::SnPakBulkEntryV1);
+    const uint64_t ExpectedIndexBlockSize =
+        static_cast<uint64_t>(sizeof(Pack::SnPakIndexHeaderV1)) + ExistingIndexEntriesSize + ExistingBulkEntriesSize;
+    if (ExpectedIndexBlockSize != OldIndexHeader.BlockSize)
+    {
+      return std::unexpected("Index block size does not match entry counts");
+    }
+
+    std::vector<Pack::SnPakIndexEntryV1> ExistingIndexEntries(OldIndexHeader.EntryCount);
+    if (!ExistingIndexEntries.empty())
+    {
+      File.read(reinterpret_cast<char*>(ExistingIndexEntries.data()), static_cast<std::streamsize>(ExistingIndexEntriesSize));
+      if (!File.good())
+      {
+        return std::unexpected("Failed to read existing index entries");
+      }
+    }
+
+    std::vector<Pack::SnPakBulkEntryV1> ExistingBulkEntries(OldIndexHeader.BulkEntryCount);
+    if (!ExistingBulkEntries.empty())
+    {
+      File.read(reinterpret_cast<char*>(ExistingBulkEntries.data()), static_cast<std::streamsize>(ExistingBulkEntriesSize));
+      if (!File.good())
+      {
+        return std::unexpected("Failed to read existing bulk entries");
+      }
+    }
+
+    std::unordered_map<AssetId, size_t, UuidHash> ExistingAssetToIndex{};
+    ExistingAssetToIndex.reserve(ExistingIndexEntries.size());
+    std::vector<AssetId> ExistingAssetOrder{};
+    ExistingAssetOrder.reserve(ExistingIndexEntries.size());
+    for (size_t ExistingIndex = 0; ExistingIndex < ExistingIndexEntries.size(); ++ExistingIndex)
+    {
+      AssetId ExistingId{};
+      std::memcpy(ExistingId.Bytes, ExistingIndexEntries[ExistingIndex].AssetId, sizeof(ExistingId.Bytes));
+
+      if (auto It = ExistingAssetToIndex.find(ExistingId); It == ExistingAssetToIndex.end())
+      {
+        ExistingAssetOrder.push_back(ExistingId);
+        ExistingAssetToIndex.emplace(ExistingId, ExistingIndex);
+      }
+      else
+      {
+        It->second = ExistingIndex;
+      }
+    }
+
+    std::unordered_map<AssetId, size_t, UuidHash> PendingById{};
+    PendingById.reserve(m_Impl->Assets.size());
+    for (size_t PendingIndex = 0; PendingIndex < m_Impl->Assets.size(); ++PendingIndex)
+    {
+      PendingById[m_Impl->Assets[PendingIndex].Id] = PendingIndex;
+    }
+
+    const auto AddString = [&StringTable, &StringToId](const std::string& Value) -> std::expected<uint32_t, std::string> {
+      if (const auto It = StringToId.find(Value); It != StringToId.end())
+      {
+        return It->second;
+      }
+      if (StringTable.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+      {
+        return std::unexpected("String table exceeds 32-bit string id range");
+      }
+      const uint32_t NewId = static_cast<uint32_t>(StringTable.size());
+      StringTable.push_back(Value);
+      StringToId.emplace(Value, NewId);
+      return NewId;
+    };
+
+    auto CopyExistingBulkEntries =
+        [&ExistingBulkEntries](const Pack::SnPakIndexEntryV1& SourceEntry, Pack::SnPakIndexEntryV1& DestEntry,
+                               std::vector<Pack::SnPakBulkEntryV1>& OutBulkEntries) -> std::expected<void, std::string> {
+      DestEntry.Flags = static_cast<uint8_t>(DestEntry.Flags & ~Pack::IndexEntryFlag_HasBulk);
+      DestEntry.BulkFirstIndex = 0;
+      DestEntry.BulkCount = 0;
+
+      if (!(SourceEntry.Flags & Pack::IndexEntryFlag_HasBulk) || SourceEntry.BulkCount == 0)
+      {
+        return {};
+      }
+      if (SourceEntry.BulkFirstIndex > ExistingBulkEntries.size() ||
+          SourceEntry.BulkCount > ExistingBulkEntries.size() - SourceEntry.BulkFirstIndex)
+      {
+        return std::unexpected("Existing asset has invalid bulk entry range");
+      }
+      if (OutBulkEntries.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) - SourceEntry.BulkCount)
+      {
+        return std::unexpected("Bulk table exceeds 32-bit range");
+      }
+
+      DestEntry.Flags = static_cast<uint8_t>(DestEntry.Flags | Pack::IndexEntryFlag_HasBulk);
+      DestEntry.BulkFirstIndex = static_cast<uint32_t>(OutBulkEntries.size());
+      DestEntry.BulkCount = SourceEntry.BulkCount;
+      for (uint32_t BulkIndex = 0; BulkIndex < SourceEntry.BulkCount; ++BulkIndex)
+      {
+        OutBulkEntries.push_back(ExistingBulkEntries[SourceEntry.BulkFirstIndex + BulkIndex]);
+      }
+      return {};
+    };
+
+    File.clear();
+    File.seekp(0, std::ios::end);
+    uint64_t CurrentOffset = static_cast<uint64_t>(File.tellp());
+
+    std::vector<Pack::SnPakIndexEntryV1> NewIndexEntries{};
+    std::vector<Pack::SnPakBulkEntryV1> NewBulkEntries{};
+    NewIndexEntries.reserve(ExistingAssetOrder.size() + PendingById.size());
+
+    auto BuildUpdatedEntry =
+        [&](const AssetPackEntry& Asset, const Pack::SnPakIndexEntryV1* ExistingEntryForBulk) -> std::expected<Pack::SnPakIndexEntryV1, std::string> {
       Pack::SnPakIndexEntryV1 Entry = {};
 
       Pack::CopyUuid(Entry.AssetId, Asset.Id.Bytes);
@@ -550,12 +731,22 @@ namespace SnAPI::AssetPipeline
       Pack::CopyUuid(Entry.CookedPayloadType, Asset.Cooked.PayloadType.Bytes);
       Entry.CookedSchemaVersion = Asset.Cooked.SchemaVersion;
 
-      Entry.NameStringId = GetStringId(Asset.Name);
+      auto NameIdResult = AddString(Asset.Name);
+      if (!NameIdResult)
+      {
+        return std::unexpected(NameIdResult.error());
+      }
+      Entry.NameStringId = *NameIdResult;
       Entry.NameHash64 = XXH3_64bits(Asset.Name.data(), Asset.Name.size());
 
       if (!Asset.VariantKey.empty())
       {
-        Entry.VariantStringId = GetStringId(Asset.VariantKey);
+        auto VariantIdResult = AddString(Asset.VariantKey);
+        if (!VariantIdResult)
+        {
+          return std::unexpected(VariantIdResult.error());
+        }
+        Entry.VariantStringId = *VariantIdResult;
         Entry.VariantHash64 = XXH3_64bits(Asset.VariantKey.data(), Asset.VariantKey.size());
       }
       else
@@ -564,7 +755,6 @@ namespace SnAPI::AssetPipeline
         Entry.VariantHash64 = 0;
       }
 
-      // Write main payload
       const auto AssetCompression = Impl::ResolveCompression(Asset.CompressionOverride, m_Impl->Compression);
       const auto AssetLevel = Impl::ResolveCompressionLevel(Asset.CompressionLevelOverride, m_Impl->CompressionLevel, AssetCompression);
       std::vector<uint8_t> CompressedPayload = Pack::Compress(Asset.Cooked.Bytes.data(), Asset.Cooked.Bytes.size(), AssetCompression, AssetLevel);
@@ -594,23 +784,39 @@ namespace SnAPI::AssetPipeline
       Entry.PayloadHashLo = PayloadHash.low64;
 
       File.write(reinterpret_cast<const char*>(&ChunkHeader), sizeof(ChunkHeader));
-      File.write(reinterpret_cast<const char*>(CompressedPayload.data()), CompressedPayload.size());
+      File.write(reinterpret_cast<const char*>(CompressedPayload.data()), static_cast<std::streamsize>(CompressedPayload.size()));
+      if (!File.good())
+      {
+        return std::unexpected("Failed to write payload chunk");
+      }
       CurrentOffset += sizeof(ChunkHeader) + CompressedPayload.size();
 
-      // Write bulk chunks
+      Entry.Flags = static_cast<uint8_t>(Entry.Flags & ~Pack::IndexEntryFlag_HasBulk);
+      Entry.BulkFirstIndex = 0;
+      Entry.BulkCount = 0;
+
       if (!Asset.Bulk.empty())
       {
-        Entry.Flags |= Pack::IndexEntryFlag_HasBulk;
-        Entry.BulkFirstIndex = static_cast<uint32_t>(BulkEntries.size());
+        if (Asset.Bulk.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+        {
+          return std::unexpected("Asset bulk chunk count exceeds 32-bit range");
+        }
+        if (NewBulkEntries.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) - Asset.Bulk.size())
+        {
+          return std::unexpected("Bulk table exceeds 32-bit range");
+        }
+
+        Entry.Flags = static_cast<uint8_t>(Entry.Flags | Pack::IndexEntryFlag_HasBulk);
+        Entry.BulkFirstIndex = static_cast<uint32_t>(NewBulkEntries.size());
         Entry.BulkCount = static_cast<uint32_t>(Asset.Bulk.size());
 
-        for (uint32_t BulkIdx = 0; BulkIdx < Asset.Bulk.size(); ++BulkIdx)
+        for (const auto& Bulk : Asset.Bulk)
         {
-          auto& Bulk = Asset.Bulk[BulkIdx];
-          Pack::ESnPakCompression BulkCompression = Bulk.CompressionOverride
-                                                      ? Impl::ToInternalCompression(*Bulk.CompressionOverride)
-                                                      : (Bulk.bCompress ? m_Impl->Compression : Pack::ESnPakCompression::None);
-          Pack::ESnPakCompressionLevel BulkLevel = Impl::ResolveCompressionLevel(Bulk.CompressionLevelOverride, m_Impl->CompressionLevel, BulkCompression);
+          const Pack::ESnPakCompression BulkCompression = Bulk.CompressionOverride
+                                                            ? Impl::ToInternalCompression(*Bulk.CompressionOverride)
+                                                            : (Bulk.bCompress ? m_Impl->Compression : Pack::ESnPakCompression::None);
+          const Pack::ESnPakCompressionLevel BulkLevel =
+              Impl::ResolveCompressionLevel(Bulk.CompressionLevelOverride, m_Impl->CompressionLevel, BulkCompression);
           std::vector<uint8_t> CompressedBulk = Pack::Compress(Bulk.Bytes.data(), Bulk.Bytes.size(), BulkCompression, BulkLevel);
 
           Pack::SnPakChunkHeaderV1 BulkChunkHeader = {};
@@ -625,12 +831,12 @@ namespace SnAPI::AssetPipeline
           BulkChunkHeader.SizeCompressed = CompressedBulk.size();
           BulkChunkHeader.SizeUncompressed = Bulk.Bytes.size();
 
-          XXH128_hash_t BulkHash = XXH3_128bits(Bulk.Bytes.data(), Bulk.Bytes.size());
+          const XXH128_hash_t BulkHash = XXH3_128bits(Bulk.Bytes.data(), Bulk.Bytes.size());
           BulkChunkHeader.HashHi = BulkHash.high64;
           BulkChunkHeader.HashLo = BulkHash.low64;
 
           Pack::SnPakBulkEntryV1 BulkEntry = {};
-          auto SemanticVal = static_cast<uint32_t>(Bulk.Semantic);
+          const auto SemanticVal = static_cast<uint32_t>(Bulk.Semantic);
           std::memcpy(BulkEntry.Semantic, &SemanticVal, 4);
           BulkEntry.SubIndex = Bulk.SubIndex;
           BulkEntry.ChunkOffset = CurrentOffset;
@@ -641,29 +847,110 @@ namespace SnAPI::AssetPipeline
           BulkEntry.HashHi = BulkHash.high64;
           BulkEntry.HashLo = BulkHash.low64;
 
-          BulkEntries.push_back(BulkEntry);
+          NewBulkEntries.push_back(BulkEntry);
 
           File.write(reinterpret_cast<const char*>(&BulkChunkHeader), sizeof(BulkChunkHeader));
-          File.write(reinterpret_cast<const char*>(CompressedBulk.data()), CompressedBulk.size());
+          File.write(reinterpret_cast<const char*>(CompressedBulk.data()), static_cast<std::streamsize>(CompressedBulk.size()));
+          if (!File.good())
+          {
+            return std::unexpected("Failed to write bulk chunk");
+          }
           CurrentOffset += sizeof(BulkChunkHeader) + CompressedBulk.size();
         }
       }
-      else
+      else if (ExistingEntryForBulk != nullptr)
       {
-        Entry.BulkFirstIndex = 0;
-        Entry.BulkCount = 0;
+        auto CopyBulkResult = CopyExistingBulkEntries(*ExistingEntryForBulk, Entry, NewBulkEntries);
+        if (!CopyBulkResult)
+        {
+          return std::unexpected(CopyBulkResult.error());
+        }
       }
 
-      IndexEntries.push_back(Entry);
+      return Entry;
+    };
+
+    for (const AssetId& ExistingId : ExistingAssetOrder)
+    {
+      const auto ExistingIndexIt = ExistingAssetToIndex.find(ExistingId);
+      if (ExistingIndexIt == ExistingAssetToIndex.end())
+      {
+        return std::unexpected("Internal error: missing existing asset index");
+      }
+
+      const auto& ExistingEntry = ExistingIndexEntries[ExistingIndexIt->second];
+      if (const auto PendingIt = PendingById.find(ExistingId); PendingIt != PendingById.end())
+      {
+        const AssetPackEntry& PendingAsset = m_Impl->Assets[PendingIt->second];
+        auto NewEntryResult = BuildUpdatedEntry(PendingAsset, &ExistingEntry);
+        if (!NewEntryResult)
+        {
+          return std::unexpected("Failed to build updated asset entry: " + NewEntryResult.error());
+        }
+        NewIndexEntries.push_back(*NewEntryResult);
+        PendingById.erase(PendingIt);
+      }
+      else
+      {
+        Pack::SnPakIndexEntryV1 PreservedEntry = ExistingEntry;
+        auto CopyBulkResult = CopyExistingBulkEntries(ExistingEntry, PreservedEntry, NewBulkEntries);
+        if (!CopyBulkResult)
+        {
+          return std::unexpected("Failed to preserve existing bulk entries: " + CopyBulkResult.error());
+        }
+        NewIndexEntries.push_back(PreservedEntry);
+      }
     }
 
-    // Write new index block (with reference to previous)
-    uint64_t NewIndexOffset = CurrentOffset;
-    std::vector<uint8_t> IndexData = Impl::BuildIndexBlock(IndexEntries, BulkEntries, OldHeader.IndexOffset, OldHeader.IndexSize);
-    File.write(reinterpret_cast<const char*>(IndexData.data()), IndexData.size());
+    for (size_t PendingIndex = 0; PendingIndex < m_Impl->Assets.size(); ++PendingIndex)
+    {
+      const AssetPackEntry& PendingAsset = m_Impl->Assets[PendingIndex];
+      const auto PendingIt = PendingById.find(PendingAsset.Id);
+      if (PendingIt == PendingById.end())
+      {
+        continue;
+      }
+      if (PendingIt->second != PendingIndex)
+      {
+        continue;
+      }
+
+      auto NewEntryResult = BuildUpdatedEntry(PendingAsset, nullptr);
+      if (!NewEntryResult)
+      {
+        return std::unexpected("Failed to build new asset entry: " + NewEntryResult.error());
+      }
+      NewIndexEntries.push_back(*NewEntryResult);
+      PendingById.erase(PendingIt);
+    }
+
+    if (NewIndexEntries.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+    {
+      return std::unexpected("Index entry count exceeds 32-bit range");
+    }
+    if (NewBulkEntries.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+    {
+      return std::unexpected("Bulk entry count exceeds 32-bit range");
+    }
+
+    const uint64_t NewStringTableOffset = CurrentOffset;
+    std::vector<uint8_t> StringTableData = Impl::BuildStringTableBlock(StringTable);
+    File.write(reinterpret_cast<const char*>(StringTableData.data()), static_cast<std::streamsize>(StringTableData.size()));
+    if (!File.good())
+    {
+      return std::unexpected("Failed to write updated string table block");
+    }
+    CurrentOffset += StringTableData.size();
+
+    const uint64_t NewIndexOffset = CurrentOffset;
+    std::vector<uint8_t> IndexData = Impl::BuildIndexBlock(NewIndexEntries, NewBulkEntries, OldHeader.IndexOffset, OldHeader.IndexSize);
+    File.write(reinterpret_cast<const char*>(IndexData.data()), static_cast<std::streamsize>(IndexData.size()));
+    if (!File.good())
+    {
+      return std::unexpected("Failed to write updated index block");
+    }
     CurrentOffset += IndexData.size();
 
-    // Update header
     Pack::SnPakHeaderV1 NewHeader = OldHeader;
     NewHeader.FileSize = CurrentOffset;
     NewHeader.IndexOffset = NewIndexOffset;
@@ -674,12 +961,16 @@ namespace SnAPI::AssetPipeline
     NewHeader.PreviousIndexSize = OldHeader.IndexSize;
     NewHeader.Flags |= Pack::SnPakFlag_HasTrailingIndex;
 
-    XXH128_hash_t IndexHash = XXH3_128bits(IndexData.data(), IndexData.size());
+    const XXH128_hash_t IndexHash = XXH3_128bits(IndexData.data(), IndexData.size());
     NewHeader.IndexHashHi = IndexHash.high64;
     NewHeader.IndexHashLo = IndexHash.low64;
 
     File.seekp(0, std::ios::beg);
     File.write(reinterpret_cast<const char*>(&NewHeader), sizeof(NewHeader));
+    if (!File.good())
+    {
+      return std::unexpected("Failed to write updated pack header");
+    }
     File.close();
 
     return {};

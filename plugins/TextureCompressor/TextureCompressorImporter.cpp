@@ -1,4 +1,5 @@
 #include "TextureCompressorIds.h"
+#include "TextureCompressorImportSettings.h"
 #include "TextureCompressorPayloads.h"
 #include "IAssetImporter.h"
 #include "IPipelineContext.h"
@@ -230,6 +231,37 @@ public:
     Ctx.LogError("FreeImage not available - cannot import: %s", Source.Uri.c_str());
     return false;
 #endif
+  }
+
+  bool ImportWithSettings(const SourceRef& Source,
+                          const SnAPI::AssetPipeline::IAssetImportSettings* Settings,
+                          std::vector<ImportedItem>& OutItems,
+                          IPipelineContext& Ctx) override
+  {
+    const std::size_t ExistingCount = OutItems.size();
+    if (!Import(Source, OutItems, Ctx))
+    {
+      return false;
+    }
+
+    if (!Settings)
+    {
+      return true;
+    }
+
+    auto Cloned = Settings->Clone();
+    if (!Cloned)
+    {
+      return true;
+    }
+    const SnAPI::AssetPipeline::AssetImportSettingsPtr SharedSettings(
+        std::shared_ptr<const SnAPI::AssetPipeline::IAssetImportSettings>(std::move(Cloned)));
+
+    for (std::size_t Index = ExistingCount; Index < OutItems.size(); ++Index)
+    {
+      OutItems[Index].ImportSettings = SharedSettings;
+    }
+    return true;
   }
 
 private:

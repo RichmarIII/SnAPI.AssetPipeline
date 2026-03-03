@@ -34,6 +34,12 @@ enum class ECompressedFormat : uint32_t
   ASTC_8x8_HDR = 22,
 };
 
+enum class ECompressionTarget : uint32_t
+{
+  BCn = 0,
+  ASTC = 1,
+};
+
 // Rich intermediate payload from importer
 struct ImageIntermediate
 {
@@ -67,6 +73,9 @@ struct TextureCompressorCookedInfo
   uint32_t BaseHeight = 0;
   uint32_t MipCount = 0;
   ECompressedFormat Format = ECompressedFormat::Unknown;
+  ECompressionTarget RequestedTarget = ECompressionTarget::BCn;
+  ECompressedFormat RequestedFormat = ECompressedFormat::Unknown;
+  float RequestedQuality = 0.5f;
   bool bSRGB = true;
   uint32_t SourceChannels = 4;
   uint32_t BlockWidth = 4;   // 4 for BCn, variable for ASTC

@@ -1,6 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "AssetManager.h"
+#include "AssetPackReader.h"
+#include "AssetPackWriter.h"
+#include "Pack/SnPakFormat.h"
 #include "SourceMountConfig.h"
 #include "Runtime/SourceAssetResolver.h"
 #include "Runtime/AutoMountScanner.h"
@@ -10,8 +13,10 @@
 #include "IPayloadSerializer.h"
 
 #include <atomic>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 
 using namespace SnAPI::AssetPipeline;
 
@@ -41,6 +46,86 @@ namespace
     std::filesystem::create_directories(FilePath.parent_path());
     std::ofstream File(FilePath, std::ios::binary);
     File.write(Content.data(), static_cast<std::streamsize>(Content.size()));
+  }
+
+  struct PackIndexSnapshot
+  {
+      Pack::SnPakHeaderV1 Header{};
+      std::vector<Pack::SnPakIndexEntryV1> Entries{};
+      std::vector<Pack::SnPakBulkEntryV1> BulkEntries{};
+  };
+
+  std::optional<PackIndexSnapshot> ReadActiveIndexSnapshot(const std::filesystem::path& PackPath)
+  {
+    std::ifstream File(PackPath, std::ios::binary);
+    if (!File.is_open())
+    {
+      return std::nullopt;
+    }
+
+    PackIndexSnapshot Snapshot{};
+    File.read(reinterpret_cast<char*>(&Snapshot.Header), sizeof(Snapshot.Header));
+    if (!File.good())
+    {
+      return std::nullopt;
+    }
+    if (std::memcmp(Snapshot.Header.Magic, Pack::kSnPakMagic, 8) != 0)
+    {
+      return std::nullopt;
+    }
+
+    File.seekg(static_cast<std::streamoff>(Snapshot.Header.IndexOffset), std::ios::beg);
+    if (!File.good())
+    {
+      return std::nullopt;
+    }
+
+    Pack::SnPakIndexHeaderV1 IndexHeader{};
+    File.read(reinterpret_cast<char*>(&IndexHeader), sizeof(IndexHeader));
+    if (!File.good())
+    {
+      return std::nullopt;
+    }
+    if (std::memcmp(IndexHeader.Magic, Pack::kIndexMagic, 4) != 0)
+    {
+      return std::nullopt;
+    }
+
+    Snapshot.Entries.resize(IndexHeader.EntryCount);
+    if (!Snapshot.Entries.empty())
+    {
+      File.read(reinterpret_cast<char*>(Snapshot.Entries.data()),
+                static_cast<std::streamsize>(Snapshot.Entries.size() * sizeof(Pack::SnPakIndexEntryV1)));
+      if (!File.good())
+      {
+        return std::nullopt;
+      }
+    }
+
+    Snapshot.BulkEntries.resize(IndexHeader.BulkEntryCount);
+    if (!Snapshot.BulkEntries.empty())
+    {
+      File.read(reinterpret_cast<char*>(Snapshot.BulkEntries.data()),
+                static_cast<std::streamsize>(Snapshot.BulkEntries.size() * sizeof(Pack::SnPakBulkEntryV1)));
+      if (!File.good())
+      {
+        return std::nullopt;
+      }
+    }
+
+    return Snapshot;
+  }
+
+  const Pack::SnPakIndexEntryV1* FindIndexEntryByAssetId(const PackIndexSnapshot& Snapshot, const AssetId& Asset)
+  {
+    for (const auto& Entry : Snapshot.Entries)
+    {
+      if (std::memcmp(Entry.AssetId, Asset.Bytes, sizeof(Asset.Bytes)) == 0)
+      {
+        return &Entry;
+      }
+    }
+    return nullptr;
   }
 
 } // namespace
@@ -255,6 +340,85 @@ TEST_CASE("AssetManager SaveRuntimeAssets succeeds with no dirty assets", "[sour
   auto Result = Manager.SaveRuntimeAssets();
   REQUIRE(Result.has_value()); // No dirty assets = nothing to save = success
   REQUIRE(Manager.GetDirtyAssetCount() == 0);
+}
+
+TEST_CASE("AssetPackWriter AppendUpdate preserves existing assets and untouched bulk", "[source][pack]")
+{
+  TempDir Dir;
+  const std::string PackPath = (Dir.Path / "append_preserve.snpak").string();
+
+  const AssetId AssetA = AssetId::Generate();
+  const AssetId AssetB = AssetId::Generate();
+  const TypeId AssetKind = SNAPI_UUID(0x44, 0x12, 0x90, 0x71, 0x88, 0x66, 0x55, 0x11, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE);
+  const TypeId PayloadType = SNAPI_UUID(0x55, 0x23, 0x91, 0x72, 0x89, 0x67, 0x56, 0x12, 0x11, 0x33, 0x55, 0x77, 0x99, 0xBB, 0xDD, 0xFF);
+
+  const auto MakePayload = [&PayloadType](std::string_view Text) {
+    return TypedPayload(PayloadType, 1u, std::vector<uint8_t>(Text.begin(), Text.end()));
+  };
+
+  std::vector<BulkChunk> AssetABulk{};
+  {
+    BulkChunk Chunk(EBulkSemantic::Unknown, 0u, false);
+    const std::string BulkText = "ASSET_A_BULK";
+    Chunk.Bytes.assign(BulkText.begin(), BulkText.end());
+    AssetABulk.push_back(std::move(Chunk));
+  }
+
+  AssetPackWriter InitialWriter{};
+  InitialWriter.AddAsset(AssetA, AssetKind, "AssetA", "", MakePayload("A_v1"), AssetABulk);
+  InitialWriter.AddAsset(AssetB, AssetKind, "AssetB", "", MakePayload("B_v1"), {});
+  REQUIRE(InitialWriter.Write(PackPath).has_value());
+
+  const auto BeforeSnapshot = ReadActiveIndexSnapshot(PackPath);
+  REQUIRE(BeforeSnapshot.has_value());
+  const Pack::SnPakIndexEntryV1* const BeforeAssetAEntry = FindIndexEntryByAssetId(*BeforeSnapshot, AssetA);
+  const Pack::SnPakIndexEntryV1* const BeforeAssetBEntry = FindIndexEntryByAssetId(*BeforeSnapshot, AssetB);
+  REQUIRE(BeforeAssetAEntry != nullptr);
+  REQUIRE(BeforeAssetBEntry != nullptr);
+  REQUIRE((BeforeAssetAEntry->Flags & Pack::IndexEntryFlag_HasBulk) != 0);
+  REQUIRE(BeforeAssetAEntry->BulkCount == 1u);
+  REQUIRE(BeforeAssetAEntry->BulkFirstIndex < BeforeSnapshot->BulkEntries.size());
+  const uint64_t BeforeAssetABulkOffset = BeforeSnapshot->BulkEntries[BeforeAssetAEntry->BulkFirstIndex].ChunkOffset;
+  const uint64_t BeforeAssetBPayloadOffset = BeforeAssetBEntry->PayloadChunkOffset;
+  const uint64_t BeforeAssetBPayloadSizeCompressed = BeforeAssetBEntry->PayloadChunkSizeCompressed;
+
+  // Update only asset A cooked bytes; no bulk is provided in the update.
+  AssetPackWriter UpdateWriter{};
+  UpdateWriter.AddAsset(AssetA, AssetKind, "AssetA", "", MakePayload("A_v2"), {});
+  REQUIRE(UpdateWriter.AppendUpdate(PackPath).has_value());
+
+  const auto AfterSnapshot = ReadActiveIndexSnapshot(PackPath);
+  REQUIRE(AfterSnapshot.has_value());
+  const Pack::SnPakIndexEntryV1* const AfterAssetAEntry = FindIndexEntryByAssetId(*AfterSnapshot, AssetA);
+  const Pack::SnPakIndexEntryV1* const AfterAssetBEntry = FindIndexEntryByAssetId(*AfterSnapshot, AssetB);
+  REQUIRE(AfterAssetAEntry != nullptr);
+  REQUIRE(AfterAssetBEntry != nullptr);
+  REQUIRE(AfterAssetBEntry->PayloadChunkOffset == BeforeAssetBPayloadOffset);
+  REQUIRE(AfterAssetBEntry->PayloadChunkSizeCompressed == BeforeAssetBPayloadSizeCompressed);
+  REQUIRE((AfterAssetAEntry->Flags & Pack::IndexEntryFlag_HasBulk) != 0);
+  REQUIRE(AfterAssetAEntry->BulkCount == 1u);
+  REQUIRE(AfterAssetAEntry->BulkFirstIndex < AfterSnapshot->BulkEntries.size());
+  REQUIRE(AfterSnapshot->BulkEntries[AfterAssetAEntry->BulkFirstIndex].ChunkOffset == BeforeAssetABulkOffset);
+
+  AssetPackReader Reader{};
+  REQUIRE(Reader.Open(PackPath).has_value());
+  REQUIRE(Reader.GetAssetCount() == 2u);
+
+  auto AssetACooked = Reader.LoadCookedPayload(AssetA);
+  REQUIRE(AssetACooked.has_value());
+  REQUIRE(std::string(AssetACooked->Bytes.begin(), AssetACooked->Bytes.end()) == "A_v2");
+
+  auto AssetBCooked = Reader.LoadCookedPayload(AssetB);
+  REQUIRE(AssetBCooked.has_value());
+  REQUIRE(std::string(AssetBCooked->Bytes.begin(), AssetBCooked->Bytes.end()) == "B_v1");
+
+  auto AssetAInfo = Reader.FindAsset(AssetA);
+  REQUIRE(AssetAInfo.has_value());
+  REQUIRE(AssetAInfo->BulkChunkCount == 1u);
+
+  auto AssetABulkRead = Reader.LoadBulkChunk(AssetA, 0u);
+  REQUIRE(AssetABulkRead.has_value());
+  REQUIRE(std::string(AssetABulkRead->begin(), AssetABulkRead->end()) == "ASSET_A_BULK");
 }
 
 // ========== Runtime Pipeline Integration Tests ==========

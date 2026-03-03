@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 #if defined(HAS_COMPRESSONATOR) && HAS_COMPRESSONATOR
 #include "compressonator.h"
@@ -10,6 +11,14 @@
 
 namespace TextureCompressorPlugin
 {
+namespace
+{
+constexpr uint32_t kThreadCountFallback = 8u;
+constexpr uint32_t kThreadCountMax = 128u; // Compressonator BC7/BC6H documented max.
+// Compressonator public headers do not expose named BC7 mode-bit constants.
+// Try all BC7 modes (0-7) for highest quality.
+constexpr uint32_t kBC7ModeMaskDefault = 0xFFu;
+} // namespace
 
 bool CompressorBackendBCn::IsAvailable()
 {
@@ -55,25 +64,22 @@ std::expected<std::vector<uint8_t>, std::string> CompressorBackendBCn::Compress(
     return std::unexpected("Unsupported BCn format: " + std::string(GetFormatName(Format)));
   }
 
-  // Create source texture
+  // Source pixels are RGBA8 from ImageIntermediate.
+  //
+  // Important: in our vendored Compressonator build (common.h defines
+  // USE_OLD_SWIZZLE), the fastest + color-correct BC7 path is to keep the
+  // byte stream as-is and tag the source as BGRA_8888. Do not add a manual
+  // pre-swizzle here unless you also re-validate color and throughput.
+  // (ARGB/BGRA pre-swizzle experiments were substantially slower and/or
+  // produced channel inversion in this configuration.)
   CMP_Texture SrcTexture = {};
   SrcTexture.dwSize = sizeof(CMP_Texture);
   SrcTexture.dwWidth = Width;
   SrcTexture.dwHeight = Height;
   SrcTexture.dwPitch = Width * 4;
-  SrcTexture.format = CMP_FORMAT_ARGB_8888;
+  SrcTexture.format = CMP_FORMAT_BGRA_8888;
   SrcTexture.dwDataSize = Width * Height * 4;
-
-  // Compressonator expects ARGB, we have RGBA - rearrange
-  std::vector<uint8_t> ArgbPixels(static_cast<size_t>(Width) * Height * 4);
-  for (size_t I = 0; I < static_cast<size_t>(Width) * Height; ++I)
-  {
-    ArgbPixels[I * 4 + 0] = Pixels[I * 4 + 3]; // A
-    ArgbPixels[I * 4 + 1] = Pixels[I * 4 + 0]; // R
-    ArgbPixels[I * 4 + 2] = Pixels[I * 4 + 1]; // G
-    ArgbPixels[I * 4 + 3] = Pixels[I * 4 + 2]; // B
-  }
-  SrcTexture.pData = ArgbPixels.data();
+  SrcTexture.pData = const_cast<uint8_t*>(Pixels);
 
   // Create destination texture
   CMP_Texture DstTexture = {};
@@ -92,6 +98,19 @@ std::expected<std::vector<uint8_t>, std::string> CompressorBackendBCn::Compress(
   Options.dwSize = sizeof(CMP_CompressOptions);
   Options.fquality = Quality;
   Options.bDisableMultiThreading = false;
+
+  // Always request full thread usage from Compressonator.
+  const uint32_t HwThreads = std::thread::hardware_concurrency();
+  const uint32_t RequestedThreads = (HwThreads > 0u) ? HwThreads : kThreadCountFallback;
+  Options.dwnumThreads = std::min(RequestedThreads, kThreadCountMax);
+
+  if (Format == ECompressedFormat::BC7)
+  {
+    // Avoid zero-initialized invalid mode-mask and use named, explicit modes.
+    Options.dwmodeMask = kBC7ModeMaskDefault;
+    Options.brestrictColour = false;
+    Options.brestrictAlpha = false;
+  }
 
   // Perform compression
   CMP_ERROR Status = CMP_ConvertTexture(&SrcTexture, &DstTexture, &Options, nullptr);

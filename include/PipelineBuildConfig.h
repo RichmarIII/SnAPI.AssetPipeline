@@ -1,12 +1,14 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "PackCompression.h"
 #include "Export.h"
+#include "IAssetImportSettings.h"
 
 namespace SnAPI::AssetPipeline
 {
@@ -24,6 +26,10 @@ struct SNAPI_ASSETPIPELINE_API PipelineBuildConfig
 
     // Build options passed to importers/cookers
     std::unordered_map<std::string, std::string> BuildOptions;
+
+    // Optional typed settings object passed to importers/cookers.
+    // When present, plugins should prefer this over stringly BuildOptions.
+    AssetImportSettingsPtr ImportSettings{};
 
     // Use deterministic UUIDs for asset IDs
     bool bDeterministicAssetIds = true;

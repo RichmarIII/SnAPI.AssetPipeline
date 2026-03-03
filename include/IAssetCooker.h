@@ -1,12 +1,14 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "Export.h"
+#include "IAssetImportSettings.h"
 #include "Uuid.h"
 #include "TypedPayload.h"
 #include "IAssetImporter.h"
@@ -52,6 +54,7 @@ struct SNAPI_ASSETPIPELINE_API CookRequest
 
     TypedPayload Intermediate;
     std::vector<SourceRef> Dependencies;
+    AssetImportSettingsPtr ImportSettings{};
 
     std::unordered_map<std::string, std::string> BuildOptions;
 
