@@ -828,20 +828,12 @@ namespace SnAPI::AssetPipeline
 
     const auto& BulkEntry = m_Impl->BulkEntries[GlobalBulkIndex];
 
-    // FIX #6: Validate SubIndex matches the expected bulk index position
-    // This ensures the bulk entry was written with correct SubIndex == array position
-    if (BulkEntry.SubIndex != BulkIndex)
-    {
-      return std::unexpected("Bulk SubIndex mismatch (expected " + std::to_string(BulkIndex) + ", got " + std::to_string(BulkEntry.SubIndex) +
-                             ") - corrupt or wrong pack");
-    }
-
-    // FIX #3 & #4 & #6: Pass bulk entry for size and identity validation
-    // FIX #6: Also pass the parent asset's AssetId for chunk identity verification
+    // Pass bulk entry for size and identity validation.
+    // SubIndex is metadata and does not have to equal the bulk array position.
     return m_Impl->LoadChunk(BulkEntry.ChunkOffset, BulkEntry.SizeCompressed, BulkEntry.SizeUncompressed,
                              nullptr,           // Not validating against main entry
                              &BulkEntry,        // For bulk identity validation
-                             Entry.AssetId);    // FIX #6: For AssetId validation
+                             Entry.AssetId);    // For AssetId validation
   }
 
   std::expected<AssetPackReader::BulkChunkInfo, std::string> AssetPackReader::GetBulkChunkInfo(AssetId Id, uint32_t BulkIndex) const
@@ -875,6 +867,42 @@ namespace SnAPI::AssetPipeline
     Info.UncompressedSize = BulkEntry.SizeUncompressed;
 
     return Info;
+  }
+
+  std::expected<uint32_t, std::string> AssetPackReader::FindBulkChunkIndex(AssetId Id, EBulkSemantic Semantic, uint32_t SubIndex) const
+  {
+    auto It = m_Impl->AssetIdToIndex.find(Id);
+    if (It == m_Impl->AssetIdToIndex.end())
+    {
+      return std::unexpected("Asset not found: " + Id.ToString());
+    }
+
+    const auto& Entry = m_Impl->IndexEntries[It->second];
+    if (!(Entry.Flags & Pack::IndexEntryFlag_HasBulk))
+    {
+      return std::unexpected("Asset has no bulk chunks");
+    }
+
+    for (uint32_t BulkIndex = 0; BulkIndex < Entry.BulkCount; ++BulkIndex)
+    {
+      uint32_t GlobalBulkIndex = Entry.BulkFirstIndex + BulkIndex;
+      if (GlobalBulkIndex >= m_Impl->BulkEntries.size())
+      {
+        return std::unexpected("Invalid bulk entry index");
+      }
+
+      const auto& BulkEntry = m_Impl->BulkEntries[GlobalBulkIndex];
+      uint32_t SemanticVal = 0;
+      std::memcpy(&SemanticVal, BulkEntry.Semantic, sizeof(SemanticVal));
+      if (static_cast<EBulkSemantic>(SemanticVal) == Semantic && BulkEntry.SubIndex == SubIndex)
+      {
+        return BulkIndex;
+      }
+    }
+
+    return std::unexpected(
+        "Bulk chunk not found for semantic " + std::to_string(static_cast<uint32_t>(Semantic)) +
+        " sub-index " + std::to_string(SubIndex));
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

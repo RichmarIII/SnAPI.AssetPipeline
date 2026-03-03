@@ -912,6 +912,22 @@ namespace SnAPI::AssetPipeline
     return Count;
   }
 
+  std::vector<AssetId> AssetPipelineEngine::GetDirtyAssetIds() const
+  {
+    std::lock_guard Lock(m_Impl->AssetsMutex);
+    std::vector<AssetId> Ids{};
+    Ids.reserve(m_Impl->CookedAssets.size());
+    for (const auto& [Name, Asset] : m_Impl->CookedAssets)
+    {
+      (void)Name;
+      if (Asset.bDirty)
+      {
+        Ids.push_back(Asset.Id);
+      }
+    }
+    return Ids;
+  }
+
   // ========== Persistence ==========
 
   std::expected<void, std::string> AssetPipelineEngine::SaveAll()

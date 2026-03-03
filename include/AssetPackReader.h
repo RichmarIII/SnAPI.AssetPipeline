@@ -80,6 +80,10 @@ public:
     };
     std::expected<BulkChunkInfo, std::string> GetBulkChunkInfo(AssetId Id, uint32_t BulkIndex) const;
 
+    // Find the local bulk-array index for a semantic/subindex pair.
+    // Returns the index expected by LoadBulkChunk/GetBulkChunkInfo.
+    std::expected<uint32_t, std::string> FindBulkChunkIndex(AssetId Id, EBulkSemantic Semantic, uint32_t SubIndex) const;
+
     // Template helper to deserialize a typed payload
     template <typename T>
     std::expected<T, std::string> LoadCookedAs(AssetId Id) const;

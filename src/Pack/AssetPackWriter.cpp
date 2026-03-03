@@ -374,7 +374,7 @@ namespace SnAPI::AssetPipeline
           Pack::SnPakBulkEntryV1 BulkEntry = {};
           auto SemanticVal = static_cast<uint32_t>(Bulk.Semantic);
           std::memcpy(BulkEntry.Semantic, &SemanticVal, 4);
-          BulkEntry.SubIndex = BulkIdx;  // Enforce SubIndex == BulkIndex (array position)
+          BulkEntry.SubIndex = Bulk.SubIndex;
           BulkEntry.ChunkOffset = CurrentOffset;
           BulkEntry.SizeCompressed = sizeof(BulkChunkHeader) + CompressedBulk.size();
           BulkEntry.SizeUncompressed = Bulk.Bytes.size();
@@ -632,7 +632,7 @@ namespace SnAPI::AssetPipeline
           Pack::SnPakBulkEntryV1 BulkEntry = {};
           auto SemanticVal = static_cast<uint32_t>(Bulk.Semantic);
           std::memcpy(BulkEntry.Semantic, &SemanticVal, 4);
-          BulkEntry.SubIndex = BulkIdx;  // Enforce SubIndex == BulkIndex (array position)
+          BulkEntry.SubIndex = Bulk.SubIndex;
           BulkEntry.ChunkOffset = CurrentOffset;
           BulkEntry.SizeCompressed = sizeof(BulkChunkHeader) + CompressedBulk.size();
           BulkEntry.SizeUncompressed = Bulk.Bytes.size();

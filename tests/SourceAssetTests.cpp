@@ -7,6 +7,7 @@
 #include "IAssetImporter.h"
 #include "IAssetCooker.h"
 #include "IPipelineContext.h"
+#include "IPayloadSerializer.h"
 
 #include <atomic>
 #include <filesystem>
@@ -266,6 +267,48 @@ namespace
   const TypeId kTestIntermediateType{0x11, 0x21, 0x31, 0x41, 0x51, 0x61, 0x71, 0x81, 0x91, 0xA1, 0xB1, 0xC1, 0xD1, 0xE1, 0xF1, 0x02};
   const TypeId kTestCookedType{0x12, 0x22, 0x32, 0x42, 0x52, 0x62, 0x72, 0x82, 0x92, 0xA2, 0xB2, 0xC2, 0xD2, 0xE2, 0xF2, 0x03};
 
+  class MockBytesPayloadSerializer : public IPayloadSerializer
+  {
+    public:
+      explicit MockBytesPayloadSerializer(const TypeId Type, const char* Name, const uint32_t SchemaVersion = 1u)
+          : m_Type(Type), m_Name(Name), m_SchemaVersion(SchemaVersion)
+      {
+      }
+
+      TypeId GetTypeId() const override
+      {
+        return m_Type;
+      }
+
+      const char* GetTypeName() const override
+      {
+        return m_Name;
+      }
+
+      uint32_t GetSchemaVersion() const override
+      {
+        return m_SchemaVersion;
+      }
+
+      void SerializeToBytes(const void* Object, std::vector<uint8_t>& OutBytes) const override
+      {
+        const auto* Data = static_cast<const std::vector<uint8_t>*>(Object);
+        OutBytes = *Data;
+      }
+
+      bool DeserializeFromBytes(void* Object, const uint8_t* Bytes, std::size_t Size) const override
+      {
+        auto* Data = static_cast<std::vector<uint8_t>*>(Object);
+        Data->assign(Bytes, Bytes + Size);
+        return true;
+      }
+
+    private:
+      TypeId m_Type{};
+      const char* m_Name = "";
+      uint32_t m_SchemaVersion = 1u;
+  };
+
   // Simple runtime type representing a processed asset
   struct TestRuntimeObject
   {
@@ -388,6 +431,8 @@ namespace
         Config.PipelineConfig.bDeterministicAssetIds = true;
 
         auto Manager = std::make_unique<AssetManager>(Config);
+
+        Manager->RegisterSerializer(std::make_unique<MockBytesPayloadSerializer>(kTestCookedType, "MockCookedPayload"));
 
         // Register mock importer & cooker
         auto Importer = std::make_unique<MockImporter>();
@@ -560,6 +605,7 @@ TEST_CASE("AssetManager pipeline with bulk chunks accessible", "[source][pipelin
 
   AssetManager Manager(Config);
 
+  Manager.RegisterSerializer(std::make_unique<MockBytesPayloadSerializer>(kTestCookedType, "MockCookedPayload"));
   Manager.RegisterImporter(std::make_unique<MockImporter>());
   Manager.RegisterCooker(std::make_unique<MockCooker>());
   Manager.RegisterFactory<TestRuntimeObject>(std::make_unique<BulkReadingFactory>());

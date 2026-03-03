@@ -1261,16 +1261,24 @@ namespace SnAPI::AssetPipeline
 
   uint32_t AssetManager::GetDirtyAssetCount() const
   {
-    uint32_t DirtyCount = m_Impl->Engine->GetDirtyCount();
+    std::unordered_set<AssetId, UuidHash> DirtyAssetIds{};
+    if (m_Impl->Engine)
+    {
+      for (const AssetId& Id : m_Impl->Engine->GetDirtyAssetIds())
+      {
+        DirtyAssetIds.insert(Id);
+      }
+    }
+
     std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
     for (const auto& [Id, Asset] : m_Impl->RuntimeAssetsById)
     {
       if (Asset.bDirty)
       {
-        ++DirtyCount;
+        DirtyAssetIds.insert(Id);
       }
     }
-    return DirtyCount;
+    return static_cast<uint32_t>(DirtyAssetIds.size());
   }
 
   std::expected<AssetId, std::string> AssetManager::UpsertRuntimeAsset(RuntimeAssetUpsert Asset)

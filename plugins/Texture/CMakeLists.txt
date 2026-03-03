@@ -7,8 +7,7 @@ add_library(TexturePlugin SHARED
 
 target_include_directories(TexturePlugin
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/src
 )
 
 target_link_libraries(TexturePlugin
@@ -18,7 +17,10 @@ target_link_libraries(TexturePlugin
 )
 
 # FreeImage linkage
-if(FREEIMAGE_FOUND OR TARGET FreeImage)
+if(TARGET FreeImage)
+    target_link_libraries(TexturePlugin PRIVATE FreeImage)
+    target_compile_definitions(TexturePlugin PRIVATE HAS_FREEIMAGE=1)
+elseif(FREEIMAGE_FOUND)
     target_link_libraries(TexturePlugin PRIVATE freeimage)
     target_compile_definitions(TexturePlugin PRIVATE HAS_FREEIMAGE=1)
 else()

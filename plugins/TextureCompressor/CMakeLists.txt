@@ -10,15 +10,16 @@ add_library(TextureCompressorPlugin SHARED
 )
 
 target_include_directories(TextureCompressorPlugin
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/src
 )
 
 target_link_libraries(TextureCompressorPlugin
-    PRIVATE
+    PUBLIC
         SnAPI.AssetPipeline
+    PRIVATE
         cereal
 )
 
@@ -39,7 +40,10 @@ else()
 endif()
 
 # FreeImage linkage
-if(FREEIMAGE_FOUND OR TARGET FreeImage)
+if(TARGET FreeImage)
+    target_link_libraries(TextureCompressorPlugin PRIVATE FreeImage)
+    target_compile_definitions(TextureCompressorPlugin PRIVATE HAS_FREEIMAGE=1)
+elseif(FREEIMAGE_FOUND)
     target_link_libraries(TextureCompressorPlugin PRIVATE freeimage)
     target_compile_definitions(TextureCompressorPlugin PRIVATE HAS_FREEIMAGE=1)
 else()

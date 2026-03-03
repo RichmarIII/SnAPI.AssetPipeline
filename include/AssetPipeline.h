@@ -103,6 +103,7 @@ public:
     std::expected<AssetId, std::string> GetAssetId(const std::string& LogicalName) const;
     std::expected<std::reference_wrapper<const CookedAsset>, std::string> GetCookedAsset(const std::string& LogicalName) const;
     uint32_t GetDirtyCount() const;
+    std::vector<AssetId> GetDirtyAssetIds() const;
 
     // ========== Persistence ==========
 
