@@ -695,6 +695,14 @@ namespace SnAPI::AssetPipeline
   std::expected<AssetId, std::string> AssetManager::ResolveAssetId(const std::string& Name, std::type_index RuntimeType)
   {
     auto Result = FindAsset(Name);
+    if (!Result.has_value() && m_Impl->SourceResolver)
+    {
+      auto SourceResult = TryPipelineSource(Name);
+      if (SourceResult.has_value())
+      {
+        return *SourceResult;
+      }
+    }
     if (!Result.has_value())
     {
       return std::unexpected(Result.error());

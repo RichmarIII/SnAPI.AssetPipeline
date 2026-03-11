@@ -282,8 +282,9 @@ public:
 
     // ========== Cached Loading (Ref-Counted) ==========
 
-    // Get a cached asset, loading if not present
-    // Returns a ref-counted handle - asset stays in cache while any handle exists
+    // Get a cached asset, loading if not present.
+    // For logical source names, this may JIT import/cook/load the final runtime type on first use.
+    // Returns a ref-counted handle - asset stays in cache while any handle exists.
     template<typename T>
     std::expected<AssetHandle<T>, std::string> Get(const std::string& Name, std::any Params = {})
     {
@@ -292,7 +293,21 @@ public:
         {
             return std::unexpected(IdResult.error());
         }
-        return GetById<T>(*IdResult, std::move(Params));
+
+        auto Handle = GetCache().Get<T>(*IdResult);
+        if (Handle.IsValid())
+        {
+            return Handle;
+        }
+
+        auto LoadResult = Load<T>(*IdResult, std::move(Params));
+        if (!LoadResult.has_value())
+        {
+            return std::unexpected(LoadResult.error());
+        }
+
+        size_t SizeEstimate = EstimateAssetSize(*IdResult, std::type_index(typeid(T)));
+        return GetCache().Insert<T>(*IdResult, std::move(*LoadResult), SizeEstimate);
     }
 
     template<typename T>
@@ -352,7 +367,8 @@ public:
 
     // ========== Asset Discovery ==========
 
-    // Find an asset by name (searches all mounted packs, respects priority)
+    // Find an asset by name (searches runtime-memory assets and mounted packs, respects priority).
+    // This is a discovery/query API and does not trigger source JIT import/cook.
     std::expected<AssetInfo, std::string> FindAsset(const std::string& Name) const;
 
     // Find an asset by ID (searches all mounted packs)
@@ -368,6 +384,7 @@ public:
     std::vector<AssetCatalogEntry> ListAssetCatalog() const;
 
     // Find a discovered asset by name with metadata.
+    // This is a discovery/query API and does not trigger source JIT import/cook.
     std::expected<AssetCatalogEntry, std::string> FindAssetCatalog(const std::string& Name) const;
 
     // Find a discovered asset by id with metadata.
