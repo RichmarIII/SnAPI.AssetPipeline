@@ -373,6 +373,8 @@ namespace SnAPI::AssetPipeline
 
         // Check for in-flight processing (deduplication)
         std::shared_future<std::expected<PipelineResult, std::string>> Future;
+        std::shared_ptr<std::promise<std::expected<PipelineResult, std::string>>> Promise;
+        bool bShouldProcess = false;
         {
           std::lock_guard Lock(InFlightMutex);
           auto It = InFlight.find(LogicalName);
@@ -382,19 +384,82 @@ namespace SnAPI::AssetPipeline
           }
           else
           {
-            std::promise<std::expected<PipelineResult, std::string>> Promise;
-            Future = Promise.get_future().share();
+            Promise = std::make_shared<std::promise<std::expected<PipelineResult, std::string>>>();
+            Future = Promise->get_future().share();
             InFlight[LogicalName] = Future;
-
-            auto Result = DoProcessSourceToMemory(AbsolutePath, LogicalName);
-            Promise.set_value(Result);
-
-            InFlight.erase(LogicalName);
-            return Result;
+            bShouldProcess = true;
           }
         }
 
-        return Future.get();
+        if (!bShouldProcess)
+        {
+          return Future.get();
+        }
+
+        struct ScopedInFlightCleanup
+        {
+          std::unordered_map<std::string, std::shared_future<std::expected<PipelineResult, std::string>>>& InFlightMap;
+          std::mutex& Mutex;
+          std::string LogicalNameValue;
+
+          ~ScopedInFlightCleanup()
+          {
+            std::lock_guard Lock(Mutex);
+            InFlightMap.erase(LogicalNameValue);
+          }
+        } Cleanup{InFlight, InFlightMutex, LogicalName};
+
+        struct ScopedReentrantGuard
+        {
+          std::string LogicalNameValue;
+          bool bActive = false;
+
+          explicit ScopedReentrantGuard(const std::string& LogicalName)
+              : LogicalNameValue(LogicalName)
+          {
+            auto [It, Inserted] = ActiveLogicalNames().insert(LogicalNameValue);
+            (void)It;
+            bActive = Inserted;
+          }
+
+          ~ScopedReentrantGuard()
+          {
+            if (bActive)
+            {
+              ActiveLogicalNames().erase(LogicalNameValue);
+            }
+          }
+
+          [[nodiscard]] static std::unordered_set<std::string>& ActiveLogicalNames()
+          {
+            thread_local std::unordered_set<std::string> Names{};
+            return Names;
+          }
+        } ReentrantGuard{LogicalName};
+
+        std::expected<PipelineResult, std::string> Result;
+        if (!ReentrantGuard.bActive)
+        {
+          Result = std::unexpected("Recursive source processing detected for logical asset: " + LogicalName);
+          Promise->set_value(Result);
+          return Result;
+        }
+
+        try
+        {
+          Result = DoProcessSourceToMemory(AbsolutePath, LogicalName);
+        }
+        catch (const std::exception& E)
+        {
+          Result = std::unexpected("Unhandled exception while processing source '" + LogicalName + "': " + E.what());
+        }
+        catch (...)
+        {
+          Result = std::unexpected("Unhandled unknown exception while processing source '" + LogicalName + "'");
+        }
+
+        Promise->set_value(Result);
+        return Result;
       }
 
       // Actually process one source file to in-memory storage
