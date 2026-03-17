@@ -92,8 +92,8 @@ namespace SnAPI::AssetPipeline
       // Mounted pack readers (sorted by priority, highest first)
       std::vector<MountedPack> Packs;
 
-      // Factories by runtime type
-      std::unordered_map<std::type_index, std::unique_ptr<IAssetFactory>> FactoriesByRuntimeType;
+      // Factories by runtime type. One runtime type may support multiple cooked payload shapes.
+      std::unordered_map<std::type_index, std::vector<std::unique_ptr<IAssetFactory>>> FactoriesByRuntimeType;
 
       // Factories by cooked payload type (for lookup during load)
       std::unordered_map<TypeId, IAssetFactory*, UuidHash> FactoriesByCookedType;
@@ -339,8 +339,28 @@ namespace SnAPI::AssetPipeline
     TypeId CookedType = Factory->GetCookedPayloadType();
     IAssetFactory* RawPtr = Factory.get();
 
-    m_Impl->FactoriesByRuntimeType[RuntimeType] = std::move(Factory);
+    m_Impl->FactoriesByRuntimeType[RuntimeType].push_back(std::move(Factory));
     m_Impl->FactoriesByCookedType[CookedType] = RawPtr;
+  }
+
+  IAssetFactory* AssetManager::ResolveFactory(const std::type_index RuntimeType, const TypeId CookedPayloadType) const
+  {
+    const auto FactoryIt = m_Impl->FactoriesByRuntimeType.find(RuntimeType);
+    if (FactoryIt == m_Impl->FactoriesByRuntimeType.end())
+    {
+      return nullptr;
+    }
+
+    const auto& Factories = FactoryIt->second;
+    for (const auto& Factory : Factories)
+    {
+      if (Factory && Factory->GetCookedPayloadType() == CookedPayloadType)
+      {
+        return Factory.get();
+      }
+    }
+
+    return nullptr;
   }
 
   std::expected<AssetInfo, std::string> AssetManager::FindAsset(const std::string& Name) const
@@ -584,19 +604,11 @@ namespace SnAPI::AssetPipeline
     }
 
     // Find factory for this runtime type
-    auto FactoryIt = m_Impl->FactoriesByRuntimeType.find(RuntimeType);
-    if (FactoryIt == m_Impl->FactoriesByRuntimeType.end())
+    IAssetFactory* Factory = ResolveFactory(RuntimeType, Info.CookedPayloadType);
+    if (!Factory)
     {
-      return std::unexpected("No factory registered for requested runtime type");
-    }
-
-    IAssetFactory* Factory = FactoryIt->second.get();
-
-    // Verify the factory handles this cooked payload type
-    if (Factory->GetCookedPayloadType() != Info.CookedPayloadType)
-    {
-      return std::unexpected("Factory cooked type mismatch - asset has type " + Info.CookedPayloadType.ToString() + " but factory expects " +
-                             Factory->GetCookedPayloadType().ToString());
+      return std::unexpected("No factory registered for requested runtime type and cooked payload type " +
+                             Info.CookedPayloadType.ToString());
     }
 
     // Load cooked payload
@@ -620,6 +632,7 @@ namespace SnAPI::AssetPipeline
                              .LoadBulk = [Reader, Id = Info.Id](uint32_t Index) { return Reader->LoadBulkChunk(Id, Index); },
                              .GetBulkInfo = [Reader, Id = Info.Id](uint32_t Index) { return Reader->GetBulkChunkInfo(Id, Index); },
                              .Registry = m_Impl->Engine->GetRegistry(),
+                             .Manager = this,
                              .Params = std::move(Params)};
 
     // Invoke factory
@@ -650,19 +663,11 @@ namespace SnAPI::AssetPipeline
     const AssetInfo& Info = *InfoResult;
 
     // Find factory for this runtime type
-    auto FactoryIt = m_Impl->FactoriesByRuntimeType.find(RuntimeType);
-    if (FactoryIt == m_Impl->FactoriesByRuntimeType.end())
+    IAssetFactory* Factory = ResolveFactory(RuntimeType, Info.CookedPayloadType);
+    if (!Factory)
     {
-      return std::unexpected("No factory registered for requested runtime type");
-    }
-
-    IAssetFactory* Factory = FactoryIt->second.get();
-
-    // Verify the factory handles this cooked payload type
-    if (Factory->GetCookedPayloadType() != Info.CookedPayloadType)
-    {
-      return std::unexpected("Factory cooked type mismatch - asset has type " + Info.CookedPayloadType.ToString() + " but factory expects " +
-                             Factory->GetCookedPayloadType().ToString());
+      return std::unexpected("No factory registered for requested runtime type and cooked payload type " +
+                             Info.CookedPayloadType.ToString());
     }
 
     // Load cooked payload
@@ -686,6 +691,7 @@ namespace SnAPI::AssetPipeline
                              .LoadBulk = [Reader, Id](uint32_t Index) { return Reader->LoadBulkChunk(Id, Index); },
                              .GetBulkInfo = [Reader, Id](uint32_t Index) { return Reader->GetBulkChunkInfo(Id, Index); },
                              .Registry = m_Impl->Engine->GetRegistry(),
+                             .Manager = this,
                              .Params = std::move(Params)};
 
     // Invoke factory
@@ -707,6 +713,50 @@ namespace SnAPI::AssetPipeline
     {
       return std::unexpected(Result.error());
     }
+    return Result->Id;
+  }
+
+  std::expected<AssetId, std::string> AssetManager::EnsureAssetFromSourcePayload(const SourcePayloadRequest& Request)
+  {
+    if (!Request.Id.IsNull())
+    {
+      auto ExistingById = FindAsset(Request.Id);
+      if (ExistingById.has_value())
+      {
+        return ExistingById->Id;
+      }
+    }
+
+    if (!Request.LogicalName.empty())
+    {
+      auto ExistingByName = FindAsset(Request.LogicalName);
+      if (ExistingByName.has_value())
+      {
+        return ExistingByName->Id;
+      }
+    }
+
+    if (Request.LogicalName.empty())
+    {
+      return std::unexpected("Source payload request logical name is empty");
+    }
+
+    SourcePayloadRequest LocalRequest = Request;
+    auto Result = m_Impl->Engine->ProcessSourcePayload(std::move(LocalRequest));
+    if (!Result.has_value())
+    {
+      return std::unexpected(Result.error());
+    }
+
+    auto CookedAssetResult = m_Impl->Engine->GetCookedAsset(Result->LogicalName);
+    if (CookedAssetResult.has_value())
+    {
+      const auto& Cooked = CookedAssetResult->get();
+      std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+      m_Impl->RuntimeAssetsById[Cooked.Id] = Cooked;
+      m_Impl->RuntimeAssetNameToId[Cooked.LogicalName] = Cooked.Id;
+    }
+
     return Result->Id;
   }
 
@@ -1442,6 +1492,92 @@ namespace SnAPI::AssetPipeline
     return {};
   }
 
+  std::expected<TypedPayload, std::string> AssetManager::LoadCookedPayload(const std::string& Name) const
+  {
+    if (Name.empty())
+    {
+      return std::unexpected("Asset name is empty");
+    }
+
+    CookedAsset RuntimeAsset{};
+    if (m_Impl->TryFindRuntimeAssetByName(Name, RuntimeAsset))
+    {
+      auto PayloadResult = ResolveCookedPayloadForLoad(RuntimeAsset.Cooked, ToAssetInfo(RuntimeAsset));
+      if (!PayloadResult.has_value())
+      {
+        return std::unexpected(PayloadResult.error());
+      }
+      return std::move(*PayloadResult);
+    }
+
+    const auto [Reader, Info, Pack] = m_Impl->FindPackForAssetByName(Name);
+    (void)Pack;
+    if (!Reader)
+    {
+      return std::unexpected("Asset not found: " + Name);
+    }
+
+    auto PayloadResult = Reader->LoadCookedPayload(Info.Id);
+    if (!PayloadResult.has_value())
+    {
+      return std::unexpected(PayloadResult.error());
+    }
+
+    auto ResolvedPayload = ResolveCookedPayloadForLoad(*PayloadResult, Info);
+    if (!ResolvedPayload.has_value())
+    {
+      return std::unexpected(ResolvedPayload.error());
+    }
+
+    return std::move(*ResolvedPayload);
+  }
+
+  std::expected<TypedPayload, std::string> AssetManager::LoadCookedPayload(const AssetId Id) const
+  {
+    if (Id.IsNull())
+    {
+      return std::unexpected("Asset id is null");
+    }
+
+    CookedAsset RuntimeAsset{};
+    if (m_Impl->TryFindRuntimeAssetById(Id, RuntimeAsset))
+    {
+      auto PayloadResult = ResolveCookedPayloadForLoad(RuntimeAsset.Cooked, ToAssetInfo(RuntimeAsset));
+      if (!PayloadResult.has_value())
+      {
+        return std::unexpected(PayloadResult.error());
+      }
+      return std::move(*PayloadResult);
+    }
+
+    const auto [Reader, Pack] = m_Impl->FindPackForAsset(Id);
+    (void)Pack;
+    if (!Reader)
+    {
+      return std::unexpected("Asset not found: " + Id.ToString());
+    }
+
+    auto InfoResult = Reader->FindAsset(Id);
+    if (!InfoResult.has_value())
+    {
+      return std::unexpected(InfoResult.error());
+    }
+
+    auto PayloadResult = Reader->LoadCookedPayload(Id);
+    if (!PayloadResult.has_value())
+    {
+      return std::unexpected(PayloadResult.error());
+    }
+
+    auto ResolvedPayload = ResolveCookedPayloadForLoad(*PayloadResult, *InfoResult);
+    if (!ResolvedPayload.has_value())
+    {
+      return std::unexpected(ResolvedPayload.error());
+    }
+
+    return std::move(*ResolvedPayload);
+  }
+
   std::expected<AssetId, std::string> AssetManager::TryPipelineSource(const std::string& Name)
   {
     if (m_Impl->Engine->HasAsset(Name))
@@ -1503,19 +1639,11 @@ namespace SnAPI::AssetPipeline
       const CookedAsset& Asset, const std::type_index RuntimeType, std::any Params)
   {
     // Find factory for this runtime type
-    auto FactoryIt = m_Impl->FactoriesByRuntimeType.find(RuntimeType);
-    if (FactoryIt == m_Impl->FactoriesByRuntimeType.end())
+    IAssetFactory* Factory = ResolveFactory(RuntimeType, Asset.Cooked.PayloadType);
+    if (!Factory)
     {
-      return std::unexpected("No factory registered for requested runtime type");
-    }
-
-    IAssetFactory* Factory = FactoryIt->second.get();
-
-    // Verify the factory handles this cooked payload type
-    if (Factory->GetCookedPayloadType() != Asset.Cooked.PayloadType)
-    {
-      return std::unexpected("Factory cooked type mismatch - asset has type " + Asset.Cooked.PayloadType.ToString() +
-                             " but factory expects " + Factory->GetCookedPayloadType().ToString());
+      return std::unexpected("No factory registered for requested runtime type and cooked payload type " +
+                             Asset.Cooked.PayloadType.ToString());
     }
 
     // Build AssetInfo for the context
@@ -1553,6 +1681,7 @@ namespace SnAPI::AssetPipeline
           };
         },
         .Registry = m_Impl->Engine->GetRegistry(),
+        .Manager = this,
         .Params = std::move(Params)};
 
     return InvokeFactoryLoad(*Factory, Context, Info);

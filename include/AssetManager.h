@@ -25,6 +25,8 @@ namespace SnAPI::AssetPipeline
 {
 
 struct CookedAsset;
+struct SourcePayloadRequest;
+class AssetManager;
 
 // Context passed to asset factories during loading
 struct AssetLoadContext
@@ -43,6 +45,9 @@ struct AssetLoadContext
 
     // Payload registry for deserialization
     const PayloadRegistry& Registry;
+
+    // Borrowed asset manager for resolving dependent runtime assets inside factories.
+    AssetManager* Manager = nullptr;
 
     // User-supplied parameters, factories cast to their expected type
     std::any Params;
@@ -280,6 +285,74 @@ public:
         return std::unique_ptr<T>(TypedPtr);
     }
 
+    template<typename T>
+    std::expected<std::unique_ptr<T>, std::string> LoadFromSourcePayload(const SourcePayloadRequest& Request, std::any Params = {})
+    {
+        auto IdResult = EnsureAssetFromSourcePayload(Request);
+        if (!IdResult.has_value())
+        {
+            return std::unexpected(IdResult.error());
+        }
+        return Load<T>(*IdResult, std::move(Params));
+    }
+
+    template<typename T>
+    std::expected<std::unique_ptr<T>, std::string> LoadUnique(const std::string& Name, std::any Params = {})
+    {
+        return Load<T>(Name, std::move(Params));
+    }
+
+    template<typename T>
+    std::expected<std::unique_ptr<T>, std::string> LoadUnique(AssetId Id, std::any Params = {})
+    {
+        return Load<T>(Id, std::move(Params));
+    }
+
+    template<typename T>
+    std::expected<std::shared_ptr<T>, std::string> LoadShared(const std::string& Name, std::any Params = {})
+    {
+        auto Result = Load<std::shared_ptr<T>>(Name, std::move(Params));
+        if (!Result.has_value())
+        {
+            return std::unexpected(Result.error());
+        }
+        if (!*Result || !**Result)
+        {
+            return std::unexpected("Factory returned a null shared runtime asset");
+        }
+        return std::move(**Result);
+    }
+
+    template<typename T>
+    std::expected<std::shared_ptr<T>, std::string> LoadShared(AssetId Id, std::any Params = {})
+    {
+        auto Result = Load<std::shared_ptr<T>>(Id, std::move(Params));
+        if (!Result.has_value())
+        {
+            return std::unexpected(Result.error());
+        }
+        if (!*Result || !**Result)
+        {
+            return std::unexpected("Factory returned a null shared runtime asset");
+        }
+        return std::move(**Result);
+    }
+
+    template<typename T>
+    std::expected<std::shared_ptr<T>, std::string> LoadSharedFromSourcePayload(const SourcePayloadRequest& Request, std::any Params = {})
+    {
+        auto Result = LoadFromSourcePayload<std::shared_ptr<T>>(Request, std::move(Params));
+        if (!Result.has_value())
+        {
+            return std::unexpected(Result.error());
+        }
+        if (!*Result || !**Result)
+        {
+            return std::unexpected("Factory returned a null shared runtime asset");
+        }
+        return std::move(**Result);
+    }
+
     // ========== Cached Loading (Ref-Counted) ==========
 
     // Get a cached asset, loading if not present.
@@ -330,6 +403,74 @@ public:
         // Insert into cache
         size_t SizeEstimate = EstimateAssetSize(Id, std::type_index(typeid(T)));
         return GetCache().Insert<T>(Id, std::move(*LoadResult), SizeEstimate);
+    }
+
+    template<typename T>
+    std::expected<AssetHandle<T>, std::string> GetFromSourcePayload(const SourcePayloadRequest& Request, std::any Params = {})
+    {
+        auto IdResult = EnsureAssetFromSourcePayload(Request);
+        if (!IdResult.has_value())
+        {
+            return std::unexpected(IdResult.error());
+        }
+        return GetById<T>(*IdResult, std::move(Params));
+    }
+
+    template<typename T>
+    std::expected<AssetHandle<T>, std::string> GetHandle(const std::string& Name, std::any Params = {})
+    {
+        return Get<T>(Name, std::move(Params));
+    }
+
+    template<typename T>
+    std::expected<AssetHandle<T>, std::string> GetHandleById(AssetId Id, std::any Params = {})
+    {
+        return GetById<T>(Id, std::move(Params));
+    }
+
+    template<typename T>
+    std::expected<std::shared_ptr<T>, std::string> GetShared(const std::string& Name, std::any Params = {})
+    {
+        auto Result = Get<std::shared_ptr<T>>(Name, std::move(Params));
+        if (!Result.has_value())
+        {
+            return std::unexpected(Result.error());
+        }
+        if (!Result->IsValid() || Result->Get() == nullptr || !*Result->Get())
+        {
+            return std::unexpected("Cached shared runtime asset is null");
+        }
+        return *Result->Get();
+    }
+
+    template<typename T>
+    std::expected<std::shared_ptr<T>, std::string> GetSharedById(AssetId Id, std::any Params = {})
+    {
+        auto Result = GetById<std::shared_ptr<T>>(Id, std::move(Params));
+        if (!Result.has_value())
+        {
+            return std::unexpected(Result.error());
+        }
+        if (!Result->IsValid() || Result->Get() == nullptr || !*Result->Get())
+        {
+            return std::unexpected("Cached shared runtime asset is null");
+        }
+        return *Result->Get();
+    }
+
+    template<typename T>
+    std::expected<std::shared_ptr<T>, std::string> GetSharedFromSourcePayload(const SourcePayloadRequest& Request, std::any Params = {})
+    {
+        auto Result = GetFromSourcePayload<std::shared_ptr<T>>(Request, std::move(Params));
+        if (!Result.has_value())
+        {
+            return std::unexpected(Result.error());
+        }
+        if (!Result->IsValid() || Result->Get() == nullptr || !*Result->Get())
+        {
+            return std::unexpected("Cached shared runtime asset is null");
+        }
+        return *Result->Get();
     }
 
     // Check if an asset is currently cached
@@ -469,6 +610,10 @@ public:
     // Save a runtime memory asset to a pack path and mark it clean.
     std::expected<void, std::string> SaveRuntimeAsset(AssetId Id, const std::string& PackPath);
 
+    // Load the cooked payload bytes for a runtime-memory or mounted-pack asset without invoking a runtime factory.
+    std::expected<TypedPayload, std::string> LoadCookedPayload(const std::string& Name) const;
+    std::expected<TypedPayload, std::string> LoadCookedPayload(AssetId Id) const;
+
     // ========== Internal (for AsyncLoader) ==========
 
     std::expected<UniqueVoidPtr, std::string> LoadAnyByName(const std::string& Name, std::type_index RuntimeType, std::any Params = {});
@@ -489,9 +634,11 @@ private:
         IAssetFactory& Factory,
         const AssetLoadContext& Context,
         const AssetInfo& Info) const;
+    IAssetFactory* ResolveFactory(std::type_index RuntimeType, TypeId CookedPayloadType) const;
 
     void RegisterFactoryImpl(std::type_index RuntimeType, std::unique_ptr<IAssetFactory> Factory);
     std::expected<AssetId, std::string> ResolveAssetId(const std::string& Name, std::type_index RuntimeType);
+    std::expected<AssetId, std::string> EnsureAssetFromSourcePayload(const SourcePayloadRequest& Request);
     size_t EstimateAssetSize(AssetId Id, std::type_index RuntimeType);
 
     std::expected<AssetId, std::string> TryPipelineSource(const std::string& Name);

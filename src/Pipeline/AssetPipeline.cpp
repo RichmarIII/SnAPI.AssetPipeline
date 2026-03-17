@@ -570,6 +570,73 @@ namespace SnAPI::AssetPipeline
 
         return FinalResult;
       }
+
+      std::expected<PipelineResult, std::string> DoProcessSourcePayloadToMemory(SourcePayloadRequest Request)
+      {
+        if (Request.LogicalName.empty())
+        {
+          return std::unexpected("Source payload request logical name is empty");
+        }
+        if (Request.AssetKind == TypeId{})
+        {
+          return std::unexpected("Source payload request asset kind is empty");
+        }
+        if (Request.Intermediate.PayloadType == TypeId{})
+        {
+          return std::unexpected("Source payload request payload type is empty");
+        }
+
+        if (Config.bDeterministicAssetIds && Request.Id.IsNull())
+        {
+          Request.Id = Context->MakeDeterministicAssetId(Request.LogicalName, Request.VariantKey);
+        }
+
+        if (!Request.ImportSettings)
+        {
+          Request.ImportSettings = Config.ImportSettings;
+        }
+
+        IAssetCooker* Cooker = Loader->FindCooker(Request.AssetKind, Request.Intermediate.PayloadType);
+        if (!Cooker)
+        {
+          return std::unexpected("No cooker found for asset: " + Request.LogicalName +
+                                 " (Kind: " + Request.AssetKind.ToString() + ")");
+        }
+
+        CookRequest Req;
+        Req.Id = Request.Id;
+        Req.LogicalName = std::move(Request.LogicalName);
+        Req.AssetKind = Request.AssetKind;
+        Req.VariantKey = std::move(Request.VariantKey);
+        Req.Intermediate = std::move(Request.Intermediate);
+        Req.Dependencies = std::move(Request.Dependencies);
+        Req.ImportSettings = std::move(Request.ImportSettings);
+        Req.BuildOptions = Config.BuildOptions;
+
+        CookResult Result;
+        if (!Cooker->Cook(Req, Result, *Context))
+        {
+          return std::unexpected("Cook failed for asset: " + Req.LogicalName);
+        }
+
+        CookedAsset Asset;
+        Asset.Id = Req.Id;
+        Asset.LogicalName = Req.LogicalName;
+        Asset.AssetKind = Req.AssetKind;
+        Asset.Cooked = std::move(Result.Cooked);
+        Asset.Bulk = std::move(Result.Bulk);
+        Asset.bDirty = true;
+
+        {
+          std::lock_guard Lock(AssetsMutex);
+          CookedAssets[Req.LogicalName] = Asset;
+        }
+
+        PipelineResult FinalResult;
+        FinalResult.Id = Asset.Id;
+        FinalResult.LogicalName = Asset.LogicalName;
+        return FinalResult;
+      }
   };
 
   AssetPipelineEngine::AssetPipelineEngine() : m_Impl(std::make_unique<Impl>()) {}
@@ -942,6 +1009,11 @@ namespace SnAPI::AssetPipeline
       const std::string& AbsolutePath, const std::string& LogicalName)
   {
     return m_Impl->ProcessSourceToMemory(AbsolutePath, LogicalName);
+  }
+
+  std::expected<PipelineResult, std::string> AssetPipelineEngine::ProcessSourcePayload(SourcePayloadRequest Request)
+  {
+    return m_Impl->DoProcessSourcePayloadToMemory(std::move(Request));
   }
 
   // ========== In-Memory Access ==========

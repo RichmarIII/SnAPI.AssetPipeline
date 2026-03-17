@@ -65,6 +65,17 @@ struct SNAPI_ASSETPIPELINE_API PipelineResult
     std::string LogicalName;
 };
 
+struct SNAPI_ASSETPIPELINE_API SourcePayloadRequest
+{
+    AssetId Id{};
+    std::string LogicalName{};
+    TypeId AssetKind{};
+    std::string VariantKey{};
+    TypedPayload Intermediate{};
+    std::vector<SourceRef> Dependencies{};
+    AssetImportSettingsPtr ImportSettings{};
+};
+
 class SNAPI_ASSETPIPELINE_API AssetPipelineEngine
 {
 public:
@@ -96,6 +107,7 @@ public:
 
     std::expected<PipelineResult, std::string> ProcessSource(
         const std::string& AbsolutePath, const std::string& LogicalName);
+    std::expected<PipelineResult, std::string> ProcessSourcePayload(SourcePayloadRequest Request);
 
     // ========== In-Memory Access ==========
 
