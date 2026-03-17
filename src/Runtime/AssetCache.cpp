@@ -115,6 +115,42 @@ namespace SnAPI::AssetPipeline
     return true;
   }
 
+  size_t AssetCache::RemoveAll(AssetId Id)
+  {
+    std::unique_lock Lock(m_CacheMutex);
+
+    std::vector<CacheKey> KeysToRemove{};
+    KeysToRemove.reserve(m_Cache.size());
+    for (const auto& [Key, Entry] : m_Cache)
+    {
+      if (Key.Id != Id || Entry->RefCount.load() > 0)
+      {
+        continue;
+      }
+      KeysToRemove.push_back(Key);
+    }
+
+    for (const CacheKey& Key : KeysToRemove)
+    {
+      const auto It = m_Cache.find(Key);
+      if (It == m_Cache.end())
+      {
+        continue;
+      }
+
+      m_MemoryUsage.fetch_sub(It->second->SizeBytes);
+      auto LruIt = m_LruMap.find(It->second.get());
+      if (LruIt != m_LruMap.end())
+      {
+        m_LruList.erase(LruIt->second);
+        m_LruMap.erase(LruIt);
+      }
+      m_Cache.erase(It);
+    }
+
+    return KeysToRemove.size();
+  }
+
   void AssetCache::ForceRemove(AssetId Id, std::type_index Type)
   {
     std::unique_lock Lock(m_CacheMutex);
@@ -137,6 +173,39 @@ namespace SnAPI::AssetPipeline
     }
 
     m_Cache.erase(It);
+  }
+
+  void AssetCache::ForceRemoveAll(AssetId Id)
+  {
+    std::unique_lock Lock(m_CacheMutex);
+
+    std::vector<CacheKey> KeysToRemove{};
+    KeysToRemove.reserve(m_Cache.size());
+    for (const auto& [Key, _] : m_Cache)
+    {
+      if (Key.Id == Id)
+      {
+        KeysToRemove.push_back(Key);
+      }
+    }
+
+    for (const CacheKey& Key : KeysToRemove)
+    {
+      const auto It = m_Cache.find(Key);
+      if (It == m_Cache.end())
+      {
+        continue;
+      }
+
+      m_MemoryUsage.fetch_sub(It->second->SizeBytes);
+      auto LruIt = m_LruMap.find(It->second.get());
+      if (LruIt != m_LruMap.end())
+      {
+        m_LruList.erase(LruIt->second);
+        m_LruMap.erase(LruIt);
+      }
+      m_Cache.erase(It);
+    }
   }
 
   size_t AssetCache::ClearUnreferenced()

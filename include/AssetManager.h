@@ -539,6 +539,12 @@ public:
     // Clear all unreferenced assets from cache
     size_t ClearUnreferencedCache();
 
+    // Invalidate all cached runtime objects for one asset id without touching unrelated assets.
+    size_t InvalidateAsset(AssetId Id);
+
+    // Force invalidate all cached runtime objects for one asset id, even if referenced.
+    void ForceInvalidateAsset(AssetId Id);
+
     // Force clear entire cache (dangerous!)
     void ClearCache();
 

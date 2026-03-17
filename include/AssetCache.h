@@ -216,8 +216,14 @@ public:
         return Remove(Id, std::type_index(typeid(T)));
     }
 
+    // Remove all unreferenced cache entries for one asset id, regardless of runtime type.
+    size_t RemoveAll(AssetId Id);
+
     // Force remove (even if referenced - dangerous!)
     void ForceRemove(AssetId Id, std::type_index Type);
+
+    // Force remove every cache entry for one asset id, regardless of runtime type.
+    void ForceRemoveAll(AssetId Id);
 
     // Clear all unreferenced assets
     size_t ClearUnreferenced();

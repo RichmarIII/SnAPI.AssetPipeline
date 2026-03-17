@@ -817,6 +817,16 @@ namespace SnAPI::AssetPipeline
     return m_Impl->Cache->ClearUnreferenced();
   }
 
+  size_t AssetManager::InvalidateAsset(const AssetId Id)
+  {
+    return m_Impl->Cache->RemoveAll(Id);
+  }
+
+  void AssetManager::ForceInvalidateAsset(const AssetId Id)
+  {
+    m_Impl->Cache->ForceRemoveAll(Id);
+  }
+
   void AssetManager::ClearCache()
   {
     m_Impl->Cache->ClearAll();
@@ -1422,7 +1432,7 @@ namespace SnAPI::AssetPipeline
     }
 
     // Deleting by ID invalidates any typed cache entry for this asset.
-    m_Impl->Cache->ClearAll();
+    m_Impl->Cache->RemoveAll(Id);
     return {};
   }
 
