@@ -1047,6 +1047,22 @@ namespace SnAPI::AssetPipeline
     return std::cref(It->second);
   }
 
+  bool AssetPipelineEngine::RemoveAsset(const AssetId Id)
+  {
+    std::lock_guard Lock(m_Impl->AssetsMutex);
+    for (auto It = m_Impl->CookedAssets.begin(); It != m_Impl->CookedAssets.end(); ++It)
+    {
+      if (It->second.Id != Id)
+      {
+        continue;
+      }
+
+      m_Impl->CookedAssets.erase(It);
+      return true;
+    }
+    return false;
+  }
+
   uint32_t AssetPipelineEngine::GetDirtyCount() const
   {
     std::lock_guard Lock(m_Impl->AssetsMutex);

@@ -819,11 +819,35 @@ namespace SnAPI::AssetPipeline
 
   size_t AssetManager::InvalidateAsset(const AssetId Id)
   {
+    if (m_Impl->Engine)
+    {
+      (void)m_Impl->Engine->RemoveAsset(Id);
+    }
+    {
+      std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+      if (const auto AssetIt = m_Impl->RuntimeAssetsById.find(Id); AssetIt != m_Impl->RuntimeAssetsById.end())
+      {
+        m_Impl->RuntimeAssetNameToId.erase(AssetIt->second.LogicalName);
+        m_Impl->RuntimeAssetsById.erase(AssetIt);
+      }
+    }
     return m_Impl->Cache->RemoveAll(Id);
   }
 
   void AssetManager::ForceInvalidateAsset(const AssetId Id)
   {
+    if (m_Impl->Engine)
+    {
+      (void)m_Impl->Engine->RemoveAsset(Id);
+    }
+    {
+      std::lock_guard Lock(m_Impl->RuntimeAssetsMutex);
+      if (const auto AssetIt = m_Impl->RuntimeAssetsById.find(Id); AssetIt != m_Impl->RuntimeAssetsById.end())
+      {
+        m_Impl->RuntimeAssetNameToId.erase(AssetIt->second.LogicalName);
+        m_Impl->RuntimeAssetsById.erase(AssetIt);
+      }
+    }
     m_Impl->Cache->ForceRemoveAll(Id);
   }
 
