@@ -28,6 +28,31 @@ struct SNAPI_ASSETPIPELINE_API SourceRef
     }
 };
 
+/**
+ * @brief Semantic dependency on another authored asset.
+ *
+ * Asset dependencies are distinct from source dependencies. Source dependencies
+ * track concrete files used for import/cook invalidation, while asset
+ * dependencies track logical asset references that package planning and runtime
+ * tooling can reason about.
+ */
+enum class EAssetDependencyKind : uint8_t
+{
+    Required = 0, /**< @brief Required semantic dependency. */
+    Optional = 1, /**< @brief Optional/reference-style dependency. */
+    Auxiliary = 2, /**< @brief Auxiliary non-runtime dependency used by higher-level tooling. */
+};
+
+/**
+ * @brief Semantic reference from one asset to another authored asset.
+ */
+struct SNAPI_ASSETPIPELINE_API AssetDependencyRef
+{
+    AssetId Id{}; /**< @brief Stable referenced asset id when known. */
+    std::string LogicalName{}; /**< @brief Referenced asset logical name when known. */
+    EAssetDependencyKind Kind = EAssetDependencyKind::Required; /**< @brief Dependency strength/category. */
+};
+
 struct SNAPI_ASSETPIPELINE_API ImportedItem
 {
     AssetId Id;
@@ -37,6 +62,7 @@ struct SNAPI_ASSETPIPELINE_API ImportedItem
 
     TypedPayload Intermediate;
     std::vector<SourceRef> Dependencies;
+    std::vector<AssetDependencyRef> AssetDependencies;
     AssetImportSettingsPtr ImportSettings{};
 
     ImportedItem() = default;

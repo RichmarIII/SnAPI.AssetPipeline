@@ -55,6 +55,7 @@ namespace SnAPI::AssetPipeline
       Info.Name = Asset.LogicalName;
       Info.VariantKey.clear();
       Info.BulkChunkCount = static_cast<uint32_t>(Asset.Bulk.size());
+      Info.AssetDependencies = Asset.AssetDependencies;
       return Info;
     }
 
@@ -66,6 +67,7 @@ namespace SnAPI::AssetPipeline
       Entry.Name = Asset.LogicalName;
       Entry.Cooked = Asset.Cooked;
       Entry.Bulk = Asset.Bulk;
+      Entry.AssetDependencies = Asset.AssetDependencies;
       return Entry;
     }
   } // namespace

@@ -1,6 +1,7 @@
 add_executable(SnAPI.AssetPipeline.Tests
     UuidTests.cpp
     PackFormatTests.cpp
+    PackDependencyTests.cpp
     PipelineTests.cpp
     CorruptionTests.cpp
     SourceAssetTests.cpp

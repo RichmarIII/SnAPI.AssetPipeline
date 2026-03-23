@@ -23,6 +23,7 @@ struct SNAPI_ASSETPIPELINE_API AssetInfo
     std::string Name;
     std::string VariantKey;
     uint32_t BulkChunkCount;
+    std::vector<AssetDependencyRef> AssetDependencies;
 };
 
 struct SNAPI_ASSETPIPELINE_API AssetPackReadOptions

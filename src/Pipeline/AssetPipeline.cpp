@@ -301,6 +301,7 @@ namespace SnAPI::AssetPipeline
           Req.VariantKey = Item.VariantKey;
           Req.Intermediate = std::move(Item.Intermediate);
           Req.Dependencies = std::move(Item.Dependencies);
+          Req.AssetDependencies = std::move(Item.AssetDependencies);
           Req.ImportSettings = Item.ImportSettings;
           Req.BuildOptions = Config.BuildOptions;
 
@@ -320,6 +321,7 @@ namespace SnAPI::AssetPipeline
           Entry.VariantKey = Req.VariantKey;
           Entry.Cooked = std::move(Result.Cooked);
           Entry.Bulk = std::move(Result.Bulk);
+          Entry.AssetDependencies = std::move(Result.AssetDependencies);
 
           Writer.AddAsset(std::move(Entry));
           ++SuccessCount;
@@ -367,7 +369,7 @@ namespace SnAPI::AssetPipeline
           auto It = CookedAssets.find(LogicalName);
           if (It != CookedAssets.end())
           {
-            return PipelineResult{It->second.Id, It->second.LogicalName};
+            return PipelineResult{It->second.Id, It->second.LogicalName, It->second.AssetDependencies};
           }
         }
 
@@ -462,11 +464,26 @@ namespace SnAPI::AssetPipeline
         return Result;
       }
 
-      // Actually process one source file to in-memory storage
-      std::expected<PipelineResult, std::string> DoProcessSourceToMemory(
+      std::expected<SourceAnalysisResult, std::string> AnalyzeSource(
           const std::string& AbsolutePath, const std::string& LogicalName)
       {
-        // Read file and compute hash
+        try
+        {
+          return DoAnalyzeSource(AbsolutePath, LogicalName);
+        }
+        catch (const std::exception& E)
+        {
+          return std::unexpected("Unhandled exception while analyzing source '" + LogicalName + "': " + E.what());
+        }
+        catch (...)
+        {
+          return std::unexpected("Unhandled unknown exception while analyzing source '" + LogicalName + "'");
+        }
+      }
+
+      std::expected<std::vector<ImportedItem>, std::string> ImportSourceItems(
+          const std::string& AbsolutePath, const std::string& LogicalName)
+      {
         std::ifstream File(AbsolutePath, std::ios::binary | std::ios::ate);
         if (!File.is_open())
         {
@@ -486,19 +503,16 @@ namespace SnAPI::AssetPipeline
 
         uint64_t ContentHash = XXH3_64bits(FileData.data(), FileData.size());
 
-        // Create source ref
         SourceRef Source;
         Source.Uri = AbsolutePath;
         Source.ContentHash = ContentHash;
 
-        // Find importer
         IAssetImporter* Importer = Loader->FindImporter(Source);
         if (!Importer)
         {
           return std::unexpected("No importer found for: " + AbsolutePath);
         }
 
-        // Import
         std::vector<ImportedItem> Items;
         if (!Importer->ImportWithSettings(Source, Config.ImportSettings.get(), Items, *Context))
         {
@@ -510,9 +524,6 @@ namespace SnAPI::AssetPipeline
           return std::unexpected("Import produced no items for: " + AbsolutePath);
         }
 
-        PipelineResult FinalResult;
-
-        // Cook each imported item
         for (auto& Item : Items)
         {
           if (!Item.ImportSettings)
@@ -521,12 +532,93 @@ namespace SnAPI::AssetPipeline
           }
 
           Item.LogicalName = LogicalName;
-
           if (Config.bDeterministicAssetIds)
           {
             Item.Id = Context->MakeDeterministicAssetId(Item.LogicalName, Item.VariantKey);
           }
+        }
 
+        return Items;
+      }
+
+      std::expected<SourceAnalysisResult, std::string> DoAnalyzeSource(
+          const std::string& AbsolutePath, const std::string& LogicalName)
+      {
+        auto ItemsResult = ImportSourceItems(AbsolutePath, LogicalName);
+        if (!ItemsResult)
+        {
+          return std::unexpected(ItemsResult.error());
+        }
+
+        auto AppendUniqueSourceDependency = [](std::vector<SourceRef>& Dependencies, const SourceRef& Dependency) {
+          const auto Existing = std::find_if(
+              Dependencies.begin(), Dependencies.end(),
+              [&](const SourceRef& Entry) { return Entry.Uri == Dependency.Uri && Entry.ContentHash == Dependency.ContentHash; });
+          if (Existing == Dependencies.end())
+          {
+            Dependencies.push_back(Dependency);
+          }
+        };
+
+        auto AppendUniqueAssetDependency = [](std::vector<AssetDependencyRef>& Dependencies,
+                                              const AssetDependencyRef& Dependency) {
+          const auto Existing = std::find_if(
+              Dependencies.begin(), Dependencies.end(),
+              [&](const AssetDependencyRef& Entry) {
+                return Entry.Id == Dependency.Id &&
+                       Entry.LogicalName == Dependency.LogicalName &&
+                       Entry.Kind == Dependency.Kind;
+              });
+          if (Existing == Dependencies.end())
+          {
+            Dependencies.push_back(Dependency);
+          }
+        };
+
+        SourceAnalysisResult Result{};
+        bool bSeeded = false;
+        for (const ImportedItem& Item : *ItemsResult)
+        {
+          if (!bSeeded)
+          {
+            Result.Id = Item.Id;
+            Result.LogicalName = Item.LogicalName;
+            bSeeded = true;
+          }
+
+          for (const SourceRef& Dependency : Item.Dependencies)
+          {
+            AppendUniqueSourceDependency(Result.Dependencies, Dependency);
+          }
+          for (const AssetDependencyRef& Dependency : Item.AssetDependencies)
+          {
+            AppendUniqueAssetDependency(Result.AssetDependencies, Dependency);
+          }
+        }
+
+        if (!bSeeded)
+        {
+          return std::unexpected("Import produced no analyzable items for: " + AbsolutePath);
+        }
+
+        return Result;
+      }
+
+      // Actually process one source file to in-memory storage
+      std::expected<PipelineResult, std::string> DoProcessSourceToMemory(
+          const std::string& AbsolutePath, const std::string& LogicalName)
+      {
+        auto ItemsResult = ImportSourceItems(AbsolutePath, LogicalName);
+        if (!ItemsResult)
+        {
+          return std::unexpected(ItemsResult.error());
+        }
+
+        PipelineResult FinalResult;
+
+        // Cook each imported item
+        for (auto& Item : *ItemsResult)
+        {
           IAssetCooker* Cooker = Loader->FindCooker(Item.AssetKind, Item.Intermediate.PayloadType);
           if (!Cooker)
           {
@@ -541,6 +633,7 @@ namespace SnAPI::AssetPipeline
           Req.VariantKey = Item.VariantKey;
           Req.Intermediate = std::move(Item.Intermediate);
           Req.Dependencies = std::move(Item.Dependencies);
+          Req.AssetDependencies = std::move(Item.AssetDependencies);
           Req.ImportSettings = Item.ImportSettings;
           Req.BuildOptions = Config.BuildOptions;
 
@@ -557,10 +650,12 @@ namespace SnAPI::AssetPipeline
           Asset.AssetKind = Req.AssetKind;
           Asset.Cooked = std::move(Result.Cooked);
           Asset.Bulk = std::move(Result.Bulk);
+          Asset.AssetDependencies = std::move(Result.AssetDependencies);
           Asset.bDirty = true;
 
           FinalResult.Id = Asset.Id;
           FinalResult.LogicalName = Asset.LogicalName;
+          FinalResult.AssetDependencies = Asset.AssetDependencies;
 
           {
             std::lock_guard Lock(AssetsMutex);
@@ -610,6 +705,7 @@ namespace SnAPI::AssetPipeline
         Req.VariantKey = std::move(Request.VariantKey);
         Req.Intermediate = std::move(Request.Intermediate);
         Req.Dependencies = std::move(Request.Dependencies);
+        Req.AssetDependencies = std::move(Request.AssetDependencies);
         Req.ImportSettings = std::move(Request.ImportSettings);
         Req.BuildOptions = Config.BuildOptions;
 
@@ -625,6 +721,7 @@ namespace SnAPI::AssetPipeline
         Asset.AssetKind = Req.AssetKind;
         Asset.Cooked = std::move(Result.Cooked);
         Asset.Bulk = std::move(Result.Bulk);
+        Asset.AssetDependencies = std::move(Result.AssetDependencies);
         Asset.bDirty = true;
 
         {
@@ -635,6 +732,7 @@ namespace SnAPI::AssetPipeline
         PipelineResult FinalResult;
         FinalResult.Id = Asset.Id;
         FinalResult.LogicalName = Asset.LogicalName;
+        FinalResult.AssetDependencies = Asset.AssetDependencies;
         return FinalResult;
       }
   };
@@ -1016,6 +1114,12 @@ namespace SnAPI::AssetPipeline
     return m_Impl->DoProcessSourcePayloadToMemory(std::move(Request));
   }
 
+  std::expected<SourceAnalysisResult, std::string> AssetPipelineEngine::AnalyzeSource(
+      const std::string& AbsolutePath, const std::string& LogicalName)
+  {
+    return m_Impl->AnalyzeSource(AbsolutePath, LogicalName);
+  }
+
   // ========== In-Memory Access ==========
 
   bool AssetPipelineEngine::HasAsset(const std::string& LogicalName) const
@@ -1143,6 +1247,7 @@ namespace SnAPI::AssetPipeline
       Entry.Name = Asset.LogicalName;
       Entry.Cooked = Asset.Cooked;
       Entry.Bulk = Asset.Bulk;
+      Entry.AssetDependencies = Asset.AssetDependencies;
 
       Writer.AddAsset(std::move(Entry));
     }

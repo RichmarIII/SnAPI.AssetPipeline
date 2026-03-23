@@ -35,6 +35,16 @@ TEST_CASE("SnPakBulkEntryV1 size is correct", "[pack]")
     REQUIRE(sizeof(SnPakBulkEntryV1) == 56);
 }
 
+TEST_CASE("SnPakDependencyOwnerV1 size is correct", "[pack]")
+{
+    REQUIRE(sizeof(SnPakDependencyOwnerV1) == 16);
+}
+
+TEST_CASE("SnPakDependencyEntryV1 size is correct", "[pack]")
+{
+    REQUIRE(sizeof(SnPakDependencyEntryV1) == 24);
+}
+
 TEST_CASE("SnPakChunkHeaderV1 size is correct", "[pack]")
 {
     REQUIRE(sizeof(SnPakChunkHeaderV1) == 80);
@@ -142,6 +152,7 @@ TEST_CASE("Variant string ID sentinel", "[pack]")
     Entry.VariantStringId = 0xFFFFFFFF;
 
     REQUIRE(Entry.VariantStringId == 0xFFFFFFFF);
+    REQUIRE(kInvalidStringId == 0xFFFFFFFFu);
 }
 
 TEST_CASE("EBulkSemantic values", "[pack]")
@@ -149,4 +160,14 @@ TEST_CASE("EBulkSemantic values", "[pack]")
     REQUIRE(static_cast<uint32_t>(EBulkSemantic::Unknown) == 0);
     REQUIRE(static_cast<uint32_t>(EBulkSemantic::Reserved_Level) == 1);
     REQUIRE(static_cast<uint32_t>(EBulkSemantic::Reserved_Aux) == 2);
+}
+
+TEST_CASE("SnPakIndexHeaderV1 dependency count helpers round-trip", "[pack]")
+{
+    SnPakIndexHeaderV1 Header = {};
+    SetDependencyOwnerCount(Header, 12);
+    SetDependencyEntryCount(Header, 34);
+
+    REQUIRE(GetDependencyOwnerCount(Header) == 12);
+    REQUIRE(GetDependencyEntryCount(Header) == 34);
 }

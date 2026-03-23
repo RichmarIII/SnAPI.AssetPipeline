@@ -56,6 +56,7 @@ struct SNAPI_ASSETPIPELINE_API CookedAsset
     TypeId AssetKind;
     TypedPayload Cooked;
     std::vector<BulkChunk> Bulk;
+    std::vector<AssetDependencyRef> AssetDependencies;
     bool bDirty = true;
 };
 
@@ -63,6 +64,22 @@ struct SNAPI_ASSETPIPELINE_API PipelineResult
 {
     AssetId Id;
     std::string LogicalName;
+    std::vector<AssetDependencyRef> AssetDependencies;
+};
+
+/**
+ * @brief Import-only source analysis result.
+ *
+ * Unlike `PipelineResult`, source analysis does not require a cook step. It
+ * reports the authored source dependencies and semantic asset dependencies that
+ * importers can determine directly from the source payload.
+ */
+struct SNAPI_ASSETPIPELINE_API SourceAnalysisResult
+{
+    AssetId Id{};
+    std::string LogicalName{};
+    std::vector<SourceRef> Dependencies{};
+    std::vector<AssetDependencyRef> AssetDependencies{};
 };
 
 struct SNAPI_ASSETPIPELINE_API SourcePayloadRequest
@@ -73,6 +90,7 @@ struct SNAPI_ASSETPIPELINE_API SourcePayloadRequest
     std::string VariantKey{};
     TypedPayload Intermediate{};
     std::vector<SourceRef> Dependencies{};
+    std::vector<AssetDependencyRef> AssetDependencies{};
     AssetImportSettingsPtr ImportSettings{};
 };
 
@@ -108,6 +126,18 @@ public:
     std::expected<PipelineResult, std::string> ProcessSource(
         const std::string& AbsolutePath, const std::string& LogicalName);
     std::expected<PipelineResult, std::string> ProcessSourcePayload(SourcePayloadRequest Request);
+    /**
+     * @brief Analyze one source file without cooking it.
+     * @param AbsolutePath Absolute source path on disk.
+     * @param LogicalName Logical asset name to assign during import analysis.
+     * @return Import-only dependency analysis for the source.
+     *
+     * This path runs importer logic and returns the source and semantic asset
+     * dependencies discovered from the authored source, but it does not invoke
+     * any cookers and does not materialize a cooked asset in memory.
+     */
+    std::expected<SourceAnalysisResult, std::string> AnalyzeSource(
+        const std::string& AbsolutePath, const std::string& LogicalName);
 
     // ========== In-Memory Access ==========
 

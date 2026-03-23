@@ -54,6 +54,7 @@ struct SNAPI_ASSETPIPELINE_API CookRequest
 
     TypedPayload Intermediate;
     std::vector<SourceRef> Dependencies;
+    std::vector<AssetDependencyRef> AssetDependencies;
     AssetImportSettingsPtr ImportSettings{};
 
     std::unordered_map<std::string, std::string> BuildOptions;
@@ -66,6 +67,7 @@ struct SNAPI_ASSETPIPELINE_API CookResult
     TypedPayload Cooked;
     std::vector<BulkChunk> Bulk;
     std::vector<SourceRef> Dependencies;
+    std::vector<AssetDependencyRef> AssetDependencies;
     std::unordered_map<std::string, std::string> Tags;
 
     CookResult() = default;

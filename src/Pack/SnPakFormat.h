@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 // All structs are byte-packed, little-endian
@@ -17,6 +18,7 @@ namespace SnAPI::AssetPipeline::Pack
   constexpr uint8_t kChunkMagic[4] = {'C', 'H', 'N', 'K'};
   constexpr uint8_t kIndexMagic[4] = {'I', 'N', 'D', 'X'};
   constexpr uint8_t kStringMagic[4] = {'S', 'T', 'R', 'S'};
+  constexpr uint32_t kInvalidStringId = 0xFFFFFFFFu;
 
   // Endian marker: 0x01020304 in native order
   constexpr uint32_t kEndianMarker = 0x01020304;
@@ -191,6 +193,32 @@ namespace SnAPI::AssetPipeline::Pack
 
   static_assert(sizeof(SnPakBulkEntryV1) == 56, "SnPakBulkEntryV1 size mismatch");
 
+  /**
+   * @brief Span mapping from an asset index entry to its dependency records.
+   */
+  struct SnPakDependencyOwnerV1
+  {
+      uint32_t AssetIndex;
+      uint32_t FirstDependencyIndex;
+      uint32_t DependencyCount;
+      uint32_t Reserved0;
+  };
+
+  static_assert(sizeof(SnPakDependencyOwnerV1) == 16, "SnPakDependencyOwnerV1 size mismatch");
+
+  /**
+   * @brief Generic semantic dependency on another authored asset.
+   */
+  struct SnPakDependencyEntryV1
+  {
+      uint8_t AssetId[16];
+      uint32_t LogicalNameStringId; // kInvalidStringId if none
+      uint8_t Kind;                 // EAssetDependencyKind
+      uint8_t Reserved[3];
+  };
+
+  static_assert(sizeof(SnPakDependencyEntryV1) == 24, "SnPakDependencyEntryV1 size mismatch");
+
   struct SnPakChunkHeaderV1
   {
       uint8_t Magic[4]; // "CHNK"
@@ -237,6 +265,30 @@ namespace SnAPI::AssetPipeline::Pack
         return false;
     }
     return true;
+  }
+
+  inline uint32_t GetDependencyOwnerCount(const SnPakIndexHeaderV1& Header)
+  {
+    uint32_t Value = 0;
+    std::memcpy(&Value, Header.Reserved + 0, sizeof(Value));
+    return Value;
+  }
+
+  inline void SetDependencyOwnerCount(SnPakIndexHeaderV1& Header, const uint32_t Count)
+  {
+    std::memcpy(Header.Reserved + 0, &Count, sizeof(Count));
+  }
+
+  inline uint32_t GetDependencyEntryCount(const SnPakIndexHeaderV1& Header)
+  {
+    uint32_t Value = 0;
+    std::memcpy(&Value, Header.Reserved + 4, sizeof(Value));
+    return Value;
+  }
+
+  inline void SetDependencyEntryCount(SnPakIndexHeaderV1& Header, const uint32_t Count)
+  {
+    std::memcpy(Header.Reserved + 4, &Count, sizeof(Count));
   }
 
   // Compression/decompression functions

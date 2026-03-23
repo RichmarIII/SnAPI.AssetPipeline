@@ -26,6 +26,7 @@ struct SNAPI_ASSETPIPELINE_API AssetPackEntry
 
     TypedPayload Cooked;
     std::vector<BulkChunk> Bulk;
+    std::vector<AssetDependencyRef> AssetDependencies;
 
     std::optional<EPackCompression> CompressionOverride;
     std::optional<EPackCompressionLevel> CompressionLevelOverride;

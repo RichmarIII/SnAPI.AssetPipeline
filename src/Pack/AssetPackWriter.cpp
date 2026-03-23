@@ -126,7 +126,10 @@ namespace SnAPI::AssetPipeline
       }
 
       static std::vector<uint8_t> BuildIndexBlock(const std::vector<Pack::SnPakIndexEntryV1>& Entries,
-                                                  const std::vector<Pack::SnPakBulkEntryV1>& BulkEntries, uint64_t PrevOffset = 0,
+                                                  const std::vector<Pack::SnPakBulkEntryV1>& BulkEntries,
+                                                  const std::vector<Pack::SnPakDependencyOwnerV1>& DependencyOwners,
+                                                  const std::vector<Pack::SnPakDependencyEntryV1>& DependencyEntries,
+                                                  uint64_t PrevOffset = 0,
                                                   uint64_t PrevSize = 0)
       {
         Pack::SnPakIndexHeaderV1 Header = {};
@@ -136,10 +139,14 @@ namespace SnAPI::AssetPipeline
         Header.BulkEntryCount = static_cast<uint32_t>(BulkEntries.size());
         Header.PreviousIndexOffset = PrevOffset;
         Header.PreviousIndexSize = PrevSize;
+        Pack::SetDependencyOwnerCount(Header, static_cast<uint32_t>(DependencyOwners.size()));
+        Pack::SetDependencyEntryCount(Header, static_cast<uint32_t>(DependencyEntries.size()));
 
         size_t EntriesSize = Entries.size() * sizeof(Pack::SnPakIndexEntryV1);
         size_t BulkEntriesSize = BulkEntries.size() * sizeof(Pack::SnPakBulkEntryV1);
-        Header.BlockSize = sizeof(Header) + EntriesSize + BulkEntriesSize;
+        size_t DependencyOwnersSize = DependencyOwners.size() * sizeof(Pack::SnPakDependencyOwnerV1);
+        size_t DependencyEntriesSize = DependencyEntries.size() * sizeof(Pack::SnPakDependencyEntryV1);
+        Header.BlockSize = sizeof(Header) + EntriesSize + BulkEntriesSize + DependencyOwnersSize + DependencyEntriesSize;
 
         std::vector<uint8_t> Result(Header.BlockSize);
         std::memcpy(Result.data(), &Header, sizeof(Header));
@@ -151,13 +158,75 @@ namespace SnAPI::AssetPipeline
         {
           std::memcpy(Result.data() + sizeof(Header) + EntriesSize, BulkEntries.data(), BulkEntriesSize);
         }
+        if (!DependencyOwners.empty())
+        {
+          std::memcpy(Result.data() + sizeof(Header) + EntriesSize + BulkEntriesSize, DependencyOwners.data(), DependencyOwnersSize);
+        }
+        if (!DependencyEntries.empty())
+        {
+          std::memcpy(Result.data() + sizeof(Header) + EntriesSize + BulkEntriesSize + DependencyOwnersSize,
+                      DependencyEntries.data(),
+                      DependencyEntriesSize);
+        }
 
-        auto [low64, high64] = XXH3_128bits(Result.data() + sizeof(Header), EntriesSize + BulkEntriesSize);
+        auto [low64, high64] =
+            XXH3_128bits(Result.data() + sizeof(Header), EntriesSize + BulkEntriesSize + DependencyOwnersSize + DependencyEntriesSize);
         auto* HeaderPtr = reinterpret_cast<Pack::SnPakIndexHeaderV1*>(Result.data());
         HeaderPtr->EntriesHashHi = high64;
         HeaderPtr->EntriesHashLo = low64;
 
         return Result;
+      }
+
+      template <typename AddStringFn>
+      static std::expected<void, std::string> AppendDependencyMetadata(const uint32_t AssetIndex,
+                                                                       const std::vector<AssetDependencyRef>& Dependencies,
+                                                                       std::vector<Pack::SnPakDependencyOwnerV1>& DependencyOwners,
+                                                                       std::vector<Pack::SnPakDependencyEntryV1>& DependencyEntries,
+                                                                       AddStringFn&& AddString)
+      {
+        if (Dependencies.empty())
+        {
+          return {};
+        }
+
+        if (DependencyOwners.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+        {
+          return std::unexpected("Dependency owner table exceeds 32-bit range");
+        }
+        if (DependencyEntries.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) - Dependencies.size())
+        {
+          return std::unexpected("Dependency entry table exceeds 32-bit range");
+        }
+
+        Pack::SnPakDependencyOwnerV1 Owner{};
+        Owner.AssetIndex = AssetIndex;
+        Owner.FirstDependencyIndex = static_cast<uint32_t>(DependencyEntries.size());
+        Owner.DependencyCount = static_cast<uint32_t>(Dependencies.size());
+        DependencyOwners.push_back(Owner);
+
+        for (const AssetDependencyRef& Dependency : Dependencies)
+        {
+          Pack::SnPakDependencyEntryV1 Entry{};
+          Pack::CopyUuid(Entry.AssetId, Dependency.Id.Bytes);
+          if (!Dependency.LogicalName.empty())
+          {
+            auto StringIdResult = AddString(Dependency.LogicalName);
+            if (!StringIdResult)
+            {
+              return std::unexpected(StringIdResult.error());
+            }
+            Entry.LogicalNameStringId = *StringIdResult;
+          }
+          else
+          {
+            Entry.LogicalNameStringId = Pack::kInvalidStringId;
+          }
+          Entry.Kind = static_cast<uint8_t>(Dependency.Kind);
+          DependencyEntries.push_back(Entry);
+        }
+
+        return {};
       }
   };
 
@@ -259,6 +328,13 @@ namespace SnAPI::AssetPipeline
       {
         AddString(Asset.VariantKey);
       }
+      for (const AssetDependencyRef& Dependency : Asset.AssetDependencies)
+      {
+        if (!Dependency.LogicalName.empty())
+        {
+          AddString(Dependency.LogicalName);
+        }
+      }
     }
 
     // Write header placeholder
@@ -283,6 +359,8 @@ namespace SnAPI::AssetPipeline
     // Write chunks and build index entries
     std::vector<Pack::SnPakIndexEntryV1> IndexEntries;
     std::vector<Pack::SnPakBulkEntryV1> BulkEntries;
+    std::vector<Pack::SnPakDependencyOwnerV1> DependencyOwners;
+    std::vector<Pack::SnPakDependencyEntryV1> DependencyEntries;
 
     for (auto& Asset : m_Impl->Assets)
     {
@@ -398,11 +476,31 @@ namespace SnAPI::AssetPipeline
       }
 
       IndexEntries.push_back(Entry);
+
+      auto DependencyResult =
+          Impl::AppendDependencyMetadata(static_cast<uint32_t>(IndexEntries.size() - 1),
+                                         Asset.AssetDependencies,
+                                         DependencyOwners,
+                                         DependencyEntries,
+                                         [&GetStringId](const std::string& Value) -> std::expected<uint32_t, std::string> {
+                                           try
+                                           {
+                                             return GetStringId(Value);
+                                           }
+                                           catch (const std::exception& E)
+                                           {
+                                             return std::unexpected(E.what());
+                                           }
+                                         });
+      if (!DependencyResult)
+      {
+        return std::unexpected(DependencyResult.error());
+      }
     }
 
     // Write index block
     uint64_t IndexOffset = CurrentOffset;
-    std::vector<uint8_t> IndexData = Impl::BuildIndexBlock(IndexEntries, BulkEntries);
+    std::vector<uint8_t> IndexData = Impl::BuildIndexBlock(IndexEntries, BulkEntries, DependencyOwners, DependencyEntries);
     File.write(reinterpret_cast<const char*>(IndexData.data()), IndexData.size());
     CurrentOffset += IndexData.size();
 
@@ -614,8 +712,15 @@ namespace SnAPI::AssetPipeline
 
     const uint64_t ExistingIndexEntriesSize = static_cast<uint64_t>(OldIndexHeader.EntryCount) * sizeof(Pack::SnPakIndexEntryV1);
     const uint64_t ExistingBulkEntriesSize = static_cast<uint64_t>(OldIndexHeader.BulkEntryCount) * sizeof(Pack::SnPakBulkEntryV1);
+    const uint64_t ExistingDependencyOwnerCount = Pack::GetDependencyOwnerCount(OldIndexHeader);
+    const uint64_t ExistingDependencyEntryCount = Pack::GetDependencyEntryCount(OldIndexHeader);
+    const uint64_t ExistingDependencyOwnersSize =
+        ExistingDependencyOwnerCount * sizeof(Pack::SnPakDependencyOwnerV1);
+    const uint64_t ExistingDependencyEntriesSize =
+        ExistingDependencyEntryCount * sizeof(Pack::SnPakDependencyEntryV1);
     const uint64_t ExpectedIndexBlockSize =
-        static_cast<uint64_t>(sizeof(Pack::SnPakIndexHeaderV1)) + ExistingIndexEntriesSize + ExistingBulkEntriesSize;
+        static_cast<uint64_t>(sizeof(Pack::SnPakIndexHeaderV1)) + ExistingIndexEntriesSize + ExistingBulkEntriesSize +
+        ExistingDependencyOwnersSize + ExistingDependencyEntriesSize;
     if (ExpectedIndexBlockSize != OldIndexHeader.BlockSize)
     {
       return std::unexpected("Index block size does not match entry counts");
@@ -641,6 +746,26 @@ namespace SnAPI::AssetPipeline
       }
     }
 
+    std::vector<Pack::SnPakDependencyOwnerV1> ExistingDependencyOwners(static_cast<size_t>(ExistingDependencyOwnerCount));
+    if (!ExistingDependencyOwners.empty())
+    {
+      File.read(reinterpret_cast<char*>(ExistingDependencyOwners.data()), static_cast<std::streamsize>(ExistingDependencyOwnersSize));
+      if (!File.good())
+      {
+        return std::unexpected("Failed to read existing dependency owner entries");
+      }
+    }
+
+    std::vector<Pack::SnPakDependencyEntryV1> ExistingDependencyEntries(static_cast<size_t>(ExistingDependencyEntryCount));
+    if (!ExistingDependencyEntries.empty())
+    {
+      File.read(reinterpret_cast<char*>(ExistingDependencyEntries.data()), static_cast<std::streamsize>(ExistingDependencyEntriesSize));
+      if (!File.good())
+      {
+        return std::unexpected("Failed to read existing dependency entries");
+      }
+    }
+
     std::unordered_map<AssetId, size_t, UuidHash> ExistingAssetToIndex{};
     ExistingAssetToIndex.reserve(ExistingIndexEntries.size());
     std::vector<AssetId> ExistingAssetOrder{};
@@ -658,6 +783,26 @@ namespace SnAPI::AssetPipeline
       else
       {
         It->second = ExistingIndex;
+      }
+    }
+
+    std::unordered_map<uint32_t, size_t> ExistingAssetIndexToDependencyOwner{};
+    ExistingAssetIndexToDependencyOwner.reserve(ExistingDependencyOwners.size());
+    for (size_t OwnerIndex = 0; OwnerIndex < ExistingDependencyOwners.size(); ++OwnerIndex)
+    {
+      const auto& Owner = ExistingDependencyOwners[OwnerIndex];
+      if (Owner.AssetIndex >= ExistingIndexEntries.size())
+      {
+        return std::unexpected("Existing dependency owner references invalid asset index");
+      }
+      if (Owner.FirstDependencyIndex > ExistingDependencyEntries.size() ||
+          Owner.DependencyCount > ExistingDependencyEntries.size() - Owner.FirstDependencyIndex)
+      {
+        return std::unexpected("Existing dependency owner references invalid dependency range");
+      }
+      if (!ExistingAssetIndexToDependencyOwner.emplace(Owner.AssetIndex, OwnerIndex).second)
+      {
+        return std::unexpected("Existing pack contains duplicate dependency owner for the same asset");
       }
     }
 
@@ -714,16 +859,55 @@ namespace SnAPI::AssetPipeline
       return {};
     };
 
+    auto CopyExistingDependencyEntries =
+        [&ExistingDependencyOwners, &ExistingDependencyEntries, &ExistingAssetIndexToDependencyOwner](
+            const uint32_t SourceAssetIndex,
+            const uint32_t DestAssetIndex,
+            std::vector<Pack::SnPakDependencyOwnerV1>& OutDependencyOwners,
+            std::vector<Pack::SnPakDependencyEntryV1>& OutDependencyEntries) -> std::expected<void, std::string> {
+      const auto OwnerIt = ExistingAssetIndexToDependencyOwner.find(SourceAssetIndex);
+      if (OwnerIt == ExistingAssetIndexToDependencyOwner.end())
+      {
+        return {};
+      }
+
+      const auto& SourceOwner = ExistingDependencyOwners[OwnerIt->second];
+      if (OutDependencyOwners.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+      {
+        return std::unexpected("Dependency owner table exceeds 32-bit range");
+      }
+      if (OutDependencyEntries.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) - SourceOwner.DependencyCount)
+      {
+        return std::unexpected("Dependency entry table exceeds 32-bit range");
+      }
+
+      Pack::SnPakDependencyOwnerV1 DestOwner{};
+      DestOwner.AssetIndex = DestAssetIndex;
+      DestOwner.FirstDependencyIndex = static_cast<uint32_t>(OutDependencyEntries.size());
+      DestOwner.DependencyCount = SourceOwner.DependencyCount;
+      OutDependencyOwners.push_back(DestOwner);
+
+      for (uint32_t DependencyIndex = 0; DependencyIndex < SourceOwner.DependencyCount; ++DependencyIndex)
+      {
+        OutDependencyEntries.push_back(ExistingDependencyEntries[SourceOwner.FirstDependencyIndex + DependencyIndex]);
+      }
+      return {};
+    };
+
     File.clear();
     File.seekp(0, std::ios::end);
     uint64_t CurrentOffset = static_cast<uint64_t>(File.tellp());
 
     std::vector<Pack::SnPakIndexEntryV1> NewIndexEntries{};
     std::vector<Pack::SnPakBulkEntryV1> NewBulkEntries{};
+    std::vector<Pack::SnPakDependencyOwnerV1> NewDependencyOwners{};
+    std::vector<Pack::SnPakDependencyEntryV1> NewDependencyEntries{};
     NewIndexEntries.reserve(ExistingAssetOrder.size() + PendingById.size());
 
     auto BuildUpdatedEntry =
-        [&](const AssetPackEntry& Asset, const Pack::SnPakIndexEntryV1* ExistingEntryForBulk) -> std::expected<Pack::SnPakIndexEntryV1, std::string> {
+        [&](const AssetPackEntry& Asset,
+            const uint32_t AssetIndex,
+            const Pack::SnPakIndexEntryV1* ExistingEntryForBulk) -> std::expected<Pack::SnPakIndexEntryV1, std::string> {
       Pack::SnPakIndexEntryV1 Entry = {};
 
       Pack::CopyUuid(Entry.AssetId, Asset.Id.Bytes);
@@ -867,6 +1051,13 @@ namespace SnAPI::AssetPipeline
         }
       }
 
+      auto DependencyResult =
+          Impl::AppendDependencyMetadata(AssetIndex, Asset.AssetDependencies, NewDependencyOwners, NewDependencyEntries, AddString);
+      if (!DependencyResult)
+      {
+        return std::unexpected(DependencyResult.error());
+      }
+
       return Entry;
     };
 
@@ -882,7 +1073,7 @@ namespace SnAPI::AssetPipeline
       if (const auto PendingIt = PendingById.find(ExistingId); PendingIt != PendingById.end())
       {
         const AssetPackEntry& PendingAsset = m_Impl->Assets[PendingIt->second];
-        auto NewEntryResult = BuildUpdatedEntry(PendingAsset, &ExistingEntry);
+        auto NewEntryResult = BuildUpdatedEntry(PendingAsset, static_cast<uint32_t>(NewIndexEntries.size()), &ExistingEntry);
         if (!NewEntryResult)
         {
           return std::unexpected("Failed to build updated asset entry: " + NewEntryResult.error());
@@ -897,6 +1088,12 @@ namespace SnAPI::AssetPipeline
         if (!CopyBulkResult)
         {
           return std::unexpected("Failed to preserve existing bulk entries: " + CopyBulkResult.error());
+        }
+        auto CopyDependencyResult = CopyExistingDependencyEntries(
+            static_cast<uint32_t>(ExistingIndexIt->second), static_cast<uint32_t>(NewIndexEntries.size()), NewDependencyOwners, NewDependencyEntries);
+        if (!CopyDependencyResult)
+        {
+          return std::unexpected("Failed to preserve existing dependency entries: " + CopyDependencyResult.error());
         }
         NewIndexEntries.push_back(PreservedEntry);
       }
@@ -915,7 +1112,7 @@ namespace SnAPI::AssetPipeline
         continue;
       }
 
-      auto NewEntryResult = BuildUpdatedEntry(PendingAsset, nullptr);
+      auto NewEntryResult = BuildUpdatedEntry(PendingAsset, static_cast<uint32_t>(NewIndexEntries.size()), nullptr);
       if (!NewEntryResult)
       {
         return std::unexpected("Failed to build new asset entry: " + NewEntryResult.error());
@@ -932,6 +1129,14 @@ namespace SnAPI::AssetPipeline
     {
       return std::unexpected("Bulk entry count exceeds 32-bit range");
     }
+    if (NewDependencyOwners.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+    {
+      return std::unexpected("Dependency owner count exceeds 32-bit range");
+    }
+    if (NewDependencyEntries.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+    {
+      return std::unexpected("Dependency entry count exceeds 32-bit range");
+    }
 
     const uint64_t NewStringTableOffset = CurrentOffset;
     std::vector<uint8_t> StringTableData = Impl::BuildStringTableBlock(StringTable);
@@ -943,7 +1148,8 @@ namespace SnAPI::AssetPipeline
     CurrentOffset += StringTableData.size();
 
     const uint64_t NewIndexOffset = CurrentOffset;
-    std::vector<uint8_t> IndexData = Impl::BuildIndexBlock(NewIndexEntries, NewBulkEntries, OldHeader.IndexOffset, OldHeader.IndexSize);
+    std::vector<uint8_t> IndexData =
+        Impl::BuildIndexBlock(NewIndexEntries, NewBulkEntries, NewDependencyOwners, NewDependencyEntries, OldHeader.IndexOffset, OldHeader.IndexSize);
     File.write(reinterpret_cast<const char*>(IndexData.data()), static_cast<std::streamsize>(IndexData.size()));
     if (!File.good())
     {
