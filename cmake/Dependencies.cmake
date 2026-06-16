@@ -102,7 +102,7 @@ FetchContent_GetProperties(lz4)
 if(NOT lz4_POPULATED)
     FetchContent_Populate(lz4)
 endif()
-add_library(lz4 STATIC
+add_library(lz4
     ${lz4_SOURCE_DIR}/lib/lz4.c
     ${lz4_SOURCE_DIR}/lib/lz4hc.c
     ${lz4_SOURCE_DIR}/lib/lz4frame.c
@@ -129,7 +129,7 @@ file(GLOB ZSTD_COMMON_SOURCES ${zstd_SOURCE_DIR}/lib/common/*.c)
 file(GLOB ZSTD_COMPRESS_SOURCES ${zstd_SOURCE_DIR}/lib/compress/*.c)
 file(GLOB ZSTD_DECOMPRESS_SOURCES ${zstd_SOURCE_DIR}/lib/decompress/*.c)
 
-add_library(libzstd_static STATIC
+add_library(libzstd_static
     ${ZSTD_COMMON_SOURCES}
     ${ZSTD_COMPRESS_SOURCES}
     ${ZSTD_DECOMPRESS_SOURCES}
@@ -164,7 +164,7 @@ FetchContent_GetProperties(sqlite3)
 if(NOT sqlite3_POPULATED)
     FetchContent_Populate(sqlite3)
 endif()
-add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
+add_library(sqlite3 ${sqlite3_SOURCE_DIR}/sqlite3.c)
 target_include_directories(sqlite3 PUBLIC
     $<BUILD_INTERFACE:${sqlite3_SOURCE_DIR}>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -280,7 +280,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64|amd64)")
 endif()
 
 if(EXISTS ${CMP_LIB_DIR}/compressonator.cpp)
-    add_library(cmp_compressonatorlib STATIC
+    add_library(cmp_compressonatorlib
         ${CMP_ROOT_SOURCES}
         ${CMP_CODEC_SOURCES}
         ${CMP_FRAMEWORK_SOURCES}
@@ -328,7 +328,7 @@ endif()
 # Only include library sources (astcenc_*), not CLI sources (astcenccli_*)
 file(GLOB ASTCENC_SOURCES ${astcencoder_SOURCE_DIR}/Source/astcenc_*.cpp)
 if(ASTCENC_SOURCES)
-    add_library(astcenc STATIC ${ASTCENC_SOURCES})
+    add_library(astcenc ${ASTCENC_SOURCES})
     target_include_directories(astcenc PUBLIC ${astcencoder_SOURCE_DIR}/Source)
     set_target_properties(astcenc PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
